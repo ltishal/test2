@@ -765,6 +765,32 @@ def _save_candidates(cid, name):
     return [_save_path(cid, name), SAVES_DIR / f"{name}.json"]
 
 
+def _collect_saves(cid):
+    """Имя → путь. Свои сохранения перекрывают одноимённые общие."""
+    prefix = f"{cid}~"
+    own, shared = {}, {}
+    for p in SAVES_DIR.glob("*.json"):
+        if p.name.endswith(".bak.json"):
+            continue
+        stem = p.stem
+        if stem.startswith(prefix):
+            own[stem[len(prefix):]] = p
+        elif "~" not in stem:
+            shared[stem] = p
+    merged = dict(shared)
+    merged.update(own)
+    return merged
+
+
+def _save_info(name, path):
+    """Имя, время последней записи (когда сохранили) и размер файла."""
+    try:
+        st = path.stat()
+        return {"name": name, "saved_at": st.st_mtime, "size": st.st_size}
+    except OSError:
+        return {"name": name, "saved_at": 0, "size": 0}
+
+
 @app.route("/api/health")
 def api_health():
     return jsonify({
@@ -807,10 +833,11 @@ def api_avatar():
         return jsonify({"ok": False, "errors": {"request": "state не передан"}}), 400
 
     # X-Forwarded-For принимаем только за доверенным прокси — иначе лимит
-    # частоты обходится подстановкой заголовка.
+    # частоты обходится подстановкой заголовка. Берём последний элемент:
+    # его дописывает сам прокси, подделать его клиент не может.
     if TRUST_PROXY:
-        ip = (request.headers.get("X-Forwarded-For", "")
-              or request.remote_addr or "?").split(",")[0].strip()
+        xff = request.headers.get("X-Forwarded-For", "")
+        ip = xff.split(",")[-1].strip() if xff else (request.remote_addr or "?")
     else:
         ip = request.remote_addr or "?"
 
@@ -898,18 +925,11 @@ def api_state():
 
 @app.route("/api/saves")
 def api_saves_list():
-    cid = _client_id()
-    prefix = f"{cid}~"
-    names = []
-    for p in SAVES_DIR.glob("*.json"):
-        if p.name.endswith(".bak.json"):
-            continue
-        stem = p.stem
-        if stem.startswith(prefix):
-            names.append(stem[len(prefix):])
-        elif "~" not in stem:
-            names.append(stem)          # старые общие сохранения
-    return jsonify(sorted(set(names)))
+    """Список сохранений игрока: имя, время записи, размер. Новые сверху."""
+    saves = _collect_saves(_client_id())
+    items = [_save_info(name, path) for name, path in saves.items()]
+    items.sort(key=lambda x: x["saved_at"], reverse=True)
+    return jsonify(items)
 
 
 @app.route("/api/save", methods=["POST"])
@@ -937,7 +957,7 @@ def api_save():
     finally:
         if os.path.exists(temp_name):
             os.unlink(temp_name)
-    return jsonify({"ok": True, "name": name})
+    return jsonify({"ok": True, "name": name, "saved_at": path.stat().st_mtime})
 
 
 @app.route("/api/save/rename", methods=["POST"])
@@ -959,7 +979,7 @@ def api_save_rename():
     if dst.exists():
         return jsonify({"ok": False, "error": "сохранение с таким именем уже есть"}), 409
     try:
-        os.replace(src, dst)
+        os.replace(src, dst)          # время записи при переименовании сохраняется
         src_bak = _save_backup(src)
         if src_bak.exists():
             os.replace(src_bak, _save_backup(dst))
