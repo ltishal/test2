@@ -1,0 +1,1542 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1a1614">
+<title>🎲 RPG ИИ-Мастер</title>
+<style>
+  :root {
+    --bg-deep: #0f0d0c; --bg-panel: #1a1614; --bg-card: #24201d;
+    --border-subtle: #3a342f; --text-primary: #e8e0d5; --text-secondary: #a89f94;
+    --accent-gold: #c9a227; --accent-crimson: #a63a3a; --accent-sapphire: #3a6ea6;
+    --font-serif: Georgia, 'Times New Roman', serif;
+    --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin:0; padding:0; height:100%; overflow:hidden; background: var(--bg-deep); }
+  body {
+    font-family: var(--font-sans); color: var(--text-primary);
+    display: flex; flex-direction: column; height: 100dvh; font-size: 16px;
+    background-image: radial-gradient(ellipse at 50% 0%, #2a2420 0%, var(--bg-deep) 70%);
+  }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 16px; padding-top: max(12px, env(safe-area-inset-top));
+    background: rgba(15, 13, 12, 0.9); backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--border-subtle); flex-shrink: 0;
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; font-family: var(--font-serif); letter-spacing: 0.5px; }
+  header h1 span { color: var(--accent-gold); }
+  #status {
+    background: rgba(26, 22, 20, 0.9); backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--border-subtle);
+    padding: 10px 16px; display: flex; flex-direction: column; gap: 8px;
+    font-size: 13px; flex-shrink: 0;
+  }
+  .status-row { display: flex; align-items: center; gap: 10px; }
+  .status-top { display: flex; align-items: center; gap: 12px; }
+  .avatar-wrap {
+    width: 48px; height: 48px; border-radius: 50%; overflow: hidden;
+    border: 2px solid var(--accent-gold); background: var(--bg-card);
+    flex-shrink: 0; position: relative; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: transform 0.2s;
+  }
+  .avatar-wrap:active { transform: scale(0.95); }
+  .avatar-wrap img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .avatar-placeholder { color: var(--accent-gold); font-size: 20px; font-family: var(--font-serif); font-weight: bold; }
+  .avatar-wrap.loading::after {
+    content: ''; position: absolute; inset: 0;
+    border: 2px solid transparent; border-top-color: var(--accent-gold);
+    border-radius: 50%; animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .status-info { flex: 1; display: flex; flex-direction: column; gap: 4px; }
+  .status-name { font-weight: 700; color: var(--accent-gold); font-family: var(--font-serif); font-size: 15px; }
+  .status-sub { font-size: 11px; color: var(--text-secondary); margin-top: -2px; }
+  .status-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+  .status-chip {
+    background: var(--bg-card); padding: 2px 8px; border-radius: 6px;
+    color: var(--text-secondary); font-size: 11px;
+    border: 1px solid var(--border-subtle);
+  }
+  .status-chip.dc-up { color: #d45a5a; border-color: #5a3a2a; background: #2a1f1a; }
+  .status-chip.dc-down { color: #7fbf7f; border-color: #2a4a2a; background: #1f2a1f; }
+  .status-chip.pos { color: #b48cff; border-color: #4a3a6e; background: #1f1a2a; }
+  .status-chip.cover { color: #5a8ed4; border-color: #2a3a5a; background: #1a1f2a; }
+  .status-chip.notes { color: #e8c8a8; border-color: #5a3a2a; background: #2a1f1a; cursor: pointer; }
+  .bar-wrap { flex: 1; height: 6px; background: var(--bg-deep); border-radius: 4px; overflow: hidden; border: 1px solid var(--border-subtle); }
+  .bar-fill { height: 100%; transition: width 0.4s ease; border-radius: 4px; }
+  .bar-hp { background: linear-gradient(90deg, #6b2020, #a63a3a, #d45a5a); }
+  .bar-xp { background: linear-gradient(90deg, #2a4a6b, #3a6ea6, #5a8ed4); }
+  .bar-label { min-width: 55px; text-align: right; color: var(--text-secondary); font-size: 11px; font-family: monospace; }
+  #quick-actions {
+    display: flex; gap: 6px; overflow-x: auto;
+    padding: 8px 14px; background: rgba(15, 13, 12, 0.95);
+    border-bottom: 1px solid var(--border-subtle);
+    scrollbar-width: none; flex-shrink: 0;
+  }
+  #quick-actions::-webkit-scrollbar { display: none; }
+  .quick-btn {
+    background: var(--bg-card); color: var(--text-primary);
+    border: 1px solid var(--border-subtle); border-radius: 18px;
+    padding: 6px 14px; font-size: 13px; white-space: nowrap;
+    cursor: pointer; flex-shrink: 0; font-family: var(--font-sans);
+    transition: background 0.2s, transform 0.1s;
+  }
+  .quick-btn:active { background: #3a342f; transform: scale(0.95); }
+  .quick-btn:disabled { opacity: 0.4; cursor: default; }
+  #chat {
+    flex: 1; overflow-y: auto; padding: 16px;
+    display: flex; flex-direction: column; gap: 14px;
+    padding-bottom: 24px; -webkit-overflow-scrolling: touch; scroll-behavior: smooth;
+  }
+  .msg {
+    max-width: 88%; padding: 12px 16px; border-radius: 12px;
+    line-height: 1.6; white-space: pre-wrap; word-wrap: break-word;
+    animation: fadeIn 0.25s ease-out;
+  }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+  .msg.user { align-self: flex-end; background: var(--bg-card); border: 1px solid var(--border-subtle); border-bottom-right-radius: 4px; }
+  .msg.master {
+    align-self: flex-start; background: transparent;
+    padding: 4px 0 4px 14px; font-family: var(--font-serif);
+    font-size: 16px; color: #d8cec2; max-width: 100%;
+    border-left: 3px solid var(--accent-gold); position: relative;
+  }
+  .msg.system {
+    align-self: center; font-size: 13px; color: var(--text-secondary);
+    background: var(--bg-panel); border: 1px dashed var(--border-subtle);
+    padding: 8px 14px; max-width: 95%; text-align: center; border-radius: 8px;
+  }
+  .msg.dice {
+    align-self: center; background: #2a1f1a; border: 1px solid #5a3a2a;
+    color: #e8c8a8; font-family: 'SF Mono', Menlo, monospace;
+    font-size: 14px; border-radius: 10px;
+  }
+  .msg.dice b { color: var(--accent-gold); }
+  .msg.dice .dice-emoji {
+    display: inline-block; font-size: 20px; vertical-align: middle;
+    animation: diceShake 0.35s ease-in-out infinite;
+  }
+  @keyframes diceShake {
+    0%, 100% { transform: rotate(0deg) scale(1); }
+    25% { transform: rotate(-25deg) scale(1.15); }
+    50% { transform: rotate(25deg) scale(0.85); }
+    75% { transform: rotate(-10deg) scale(1.05); }
+  }
+  .typing-indicator::after { content: '▍'; animation: blink 1s infinite; color: var(--accent-gold); }
+  @keyframes blink { 0%, 50% { opacity: 1; } 51%, 100% { opacity: 0; } }
+  .speak-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 26px; height: 26px; border-radius: 6px;
+    background: transparent; border: 1px solid var(--border-subtle);
+    color: var(--text-secondary); cursor: pointer; font-size: 13px;
+    margin-left: 8px; vertical-align: middle;
+    transition: background 0.15s, color 0.15s; padding: 0;
+  }
+  .speak-btn:hover { background: var(--bg-card); color: var(--accent-gold); }
+  .speak-btn.playing { color: var(--accent-gold); border-color: var(--accent-gold); animation: ttsPulse 1.2s infinite; }
+  @keyframes ttsPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+  .tts-active { color: var(--accent-gold); border-color: var(--accent-gold); }
+  #input-bar {
+    display: flex; gap: 8px; padding: 12px 14px;
+    padding-bottom: max(12px, env(safe-area-inset-bottom));
+    background: rgba(15, 13, 12, 0.95); backdrop-filter: blur(10px);
+    border-top: 1px solid var(--border-subtle);
+    align-items: flex-end; flex-shrink: 0;
+  }
+  #input {
+    flex: 1; background: var(--bg-card); border: 1px solid var(--border-subtle);
+    color: var(--text-primary); border-radius: 10px;
+    padding: 12px 14px; font-family: var(--font-sans);
+    font-size: 16px; resize: none; outline: none; max-height: 120px;
+    line-height: 1.4; transition: border-color 0.2s;
+  }
+  #input:focus { border-color: var(--accent-gold); }
+  #send-btn {
+    width: 46px; height: 46px; border-radius: 10px;
+    background: var(--accent-gold); color: #1a1614; border: none;
+    font-size: 20px; font-weight: bold; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0; transition: opacity 0.2s;
+  }
+  #send-btn:disabled { background: #4a4440; opacity: 0.5; }
+  .btn { background: var(--bg-card); color: var(--text-primary); border: 1px solid var(--border-subtle); border-radius: 8px; padding: 10px 14px; font-size: 14px; cursor: pointer; font-family: var(--font-sans); transition: background 0.2s; }
+  .btn:active { background: #3a342f; }
+  .btn.primary { background: var(--accent-gold); border-color: var(--accent-gold); color: #1a1614; font-weight: 600; }
+  .icon-btn { width: 40px; height: 40px; border-radius: 8px; background: var(--bg-card); border: 1px solid var(--border-subtle); color: var(--text-primary); font-size: 18px; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+  #drawer-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.7); opacity: 0; pointer-events: none; transition: opacity 0.25s; z-index: 10; }
+  #drawer-bg.open { opacity: 1; pointer-events: auto; }
+  #drawer {
+    position: fixed; top: 0; right: 0; bottom: 0; width: min(340px, 90vw);
+    background: var(--bg-panel); border-left: 1px solid var(--border-subtle);
+    transform: translateX(100%); transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    z-index: 11; padding: 24px; padding-top: max(24px, env(safe-area-inset-top));
+    display: flex; flex-direction: column; gap: 12px; overflow-y: auto;
+  }
+  #drawer.open { transform: translateX(0); }
+  #drawer h2 { font-size: 12px; color: var(--accent-gold); margin: 12px 0 4px; font-weight: 700; text-transform: uppercase; letter-spacing: 1.5px; }
+  .drawer-section { display: flex; flex-direction: column; gap: 8px; }
+  #drawer .btn { width: 100%; text-align: left; padding: 12px 16px; font-size: 15px; position: relative; }
+  .drawer-badge {
+    position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
+    background: var(--accent-gold); color: #1a1614; border-radius: 10px;
+    padding: 1px 7px; font-size: 11px; font-weight: 700;
+  }
+  #modal { position: fixed; inset: 0; background: rgba(0,0,0,0.8); display: none; align-items: center; justify-content: center; z-index: 20; padding: 20px; }
+  #modal.open { display: flex; }
+  .modal-content { background: var(--bg-panel); border: 1px solid var(--border-subtle); border-radius: 14px; padding: 24px; width: 100%; max-width: 460px; max-height: 85vh; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; }
+  .modal-content h3 { margin: 0 0 4px; font-size: 18px; font-family: var(--font-serif); color: var(--accent-gold); }
+  .modal-content input { width: 100%; background: var(--bg-deep); border: 1px solid var(--border-subtle); color: var(--text-primary); border-radius: 8px; padding: 12px 14px; font-size: 16px; font-family: var(--font-sans); outline: none; }
+  .save-item { padding: 12px 14px; background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 8px; cursor: pointer; font-size: 14px; }
+  .save-item:active { background: #3a342f; }
+  .kv { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border-subtle); font-size: 14px; }
+  .kv:last-child { border-bottom: none; }
+  .kv .k { color: var(--text-secondary); }
+  .kv .v { color: var(--text-primary); font-weight: 500; font-family: var(--font-serif); }
+  .tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .tag { background: var(--bg-card); padding: 5px 12px; border-radius: 6px; font-size: 13px; color: var(--text-secondary); border: 1px solid var(--border-subtle); }
+  .tag.empty { color: #5a5a4e; font-style: italic; }
+  .tag.skill { border-color: #4a3a6e; color: #b48cff; }
+  .tag.ability { border-color: #5a3a2a; color: #e8c8a8; }
+  .tag.warn { border-color: #5a3a2a; color: #d45a5a; background: #2a1f1a; }
+  .tag.good { border-color: #2a4a2a; color: #7fbf7f; background: #1f2a1f; }
+  .stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .stat-box { background: var(--bg-card); padding: 10px; border-radius: 8px; text-align: center; border: 1px solid var(--border-subtle); }
+  .stat-box .lbl { font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; }
+  .stat-box .val { font-size: 18px; font-weight: 700; color: var(--accent-gold); margin-top: 4px; font-family: var(--font-serif); }
+  .stat-box .mod { font-size: 11px; color: var(--text-secondary); margin-top: 2px; font-family: monospace; }
+  .avatar-large { display: block; margin: 0 auto; width: 220px; height: 220px; border-radius: 50%; border: 3px solid var(--accent-gold); object-fit: cover; background: var(--bg-deep); }
+  .dc-box { background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 8px; padding: 10px; margin-top: 8px; }
+  .dc-box.up { border-color: #5a3a2a; }
+  .dc-box.down { border-color: #2a4a2a; }
+  .dc-box .dc-val { font-size: 20px; font-weight: 700; font-family: var(--font-serif); }
+  .dc-box.up .dc-val { color: #d45a5a; }
+  .dc-box.down .dc-val { color: #7fbf7f; }
+  .dc-box .dc-val.neutral { color: var(--text-secondary); }
+  .ability-card {
+    background: var(--bg-card); border: 1px solid var(--border-subtle);
+    border-radius: 8px; padding: 10px 12px; margin-bottom: 8px;
+  }
+  .ability-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 4px; }
+  .ability-name { font-weight: 600; color: var(--accent-gold); font-size: 14px; font-family: var(--font-serif); }
+  .ability-uses { font-size: 12px; font-family: monospace; color: var(--text-secondary); }
+  .ability-uses.empty { color: #d45a5a; }
+  .ability-desc { font-size: 12px; color: var(--text-secondary); line-height: 1.4; }
+  .ability-recharge { font-size: 10px; color: #5a5a4e; margin-top: 3px; font-style: italic; }
+  .ability-card.passive { border-color: #4a3a6e; }
+  .ability-card.passive .ability-name { color: #b48cff; }
+  .situation-box {
+    background: var(--bg-card); border: 1px solid var(--border-subtle);
+    border-radius: 8px; padding: 10px 12px; margin-top: 8px;
+  }
+  .situation-box .sit-row { display: flex; justify-content: space-between; padding: 4px 0; font-size: 13px; }
+  .situation-box .sit-row .lbl { color: var(--text-secondary); }
+  .situation-box .sit-row .val { color: var(--text-primary); font-weight: 500; }
+  .situation-box .sit-row .val.warn { color: #d45a5a; }
+  .situation-box .sit-row .val.good { color: #7fbf7f; }
+  .dice-preset {
+    flex: 1 1 auto; min-width: 62px; padding: 8px 10px;
+    background: var(--bg-card); color: var(--text-primary);
+    border: 1px solid var(--border-subtle); border-radius: 8px;
+    cursor: pointer; font-family: monospace; font-size: 14px;
+    transition: background 0.15s;
+  }
+  .dice-preset:active { background: #3a342f; }
+  .dice-preset.active { border-color: var(--accent-gold); color: var(--accent-gold); }
+  /* Заметки */
+  .note-tabs {
+    display: flex; gap: 6px; overflow-x: auto; padding-bottom: 4px;
+    scrollbar-width: none;
+  }
+  .note-tabs::-webkit-scrollbar { display: none; }
+  .note-tab {
+    padding: 6px 12px; border-radius: 16px; font-size: 12px;
+    background: var(--bg-card); color: var(--text-secondary);
+    border: 1px solid var(--border-subtle); cursor: pointer;
+    white-space: nowrap; flex-shrink: 0;
+  }
+  .note-tab.active { background: var(--accent-gold); color: #1a1614; border-color: var(--accent-gold); font-weight: 600; }
+  .note-card {
+    background: var(--bg-card); border: 1px solid var(--border-subtle);
+    border-radius: 8px; padding: 10px 12px; margin-bottom: 8px;
+    cursor: pointer; transition: background 0.15s;
+  }
+  .note-card:active { background: #3a342f; }
+  .note-card.unread { border-left: 3px solid var(--accent-gold); }
+  .note-header {
+    display: flex; justify-content: space-between; align-items: baseline;
+    margin-bottom: 4px; gap: 8px;
+  }
+  .note-title { font-weight: 600; color: var(--text-primary); font-size: 14px; flex: 1; }
+  .note-type-badge {
+    font-size: 10px; color: var(--text-secondary);
+    background: var(--bg-deep); padding: 1px 6px; border-radius: 4px;
+  }
+  .note-meta { font-size: 11px; color: var(--text-secondary); margin-bottom: 4px; }
+  .note-content { font-size: 13px; color: var(--text-secondary); line-height: 1.4; }
+  .note-content.expanded { color: var(--text-primary); }
+  .note-actions { display: flex; gap: 6px; margin-top: 6px; }
+  .note-action-btn {
+    background: transparent; border: 1px solid var(--border-subtle);
+    color: var(--text-secondary); border-radius: 6px;
+    padding: 3px 8px; font-size: 11px; cursor: pointer;
+  }
+  .note-action-btn:active { background: var(--bg-deep); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🎲 <span>RPG</span> ИИ-Мастер</h1>
+  <button class="icon-btn" id="menu-btn" aria-label="Меню">☰</button>
+</header>
+
+<div id="status"></div>
+
+<div id="quick-actions">
+  <button class="quick-btn" data-quick="Я внимательно осматриваюсь вокруг. Что я вижу?">🔍 Осмотреться</button>
+  <button class="quick-btn" data-quick="Я встаю и готовлюсь к действию.">🧍 Встать</button>
+  <button class="quick-btn" data-quick="Я прячусь за ближайшим укрытием.">🛡 В укрытие</button>
+  <button class="quick-btn" data-quick="Я иду вперёд, готовый к опасности.">🚶 Идти</button>
+  <button class="quick-btn" data-quick="Я обращаюсь к ближайшему NPC.">🗣 Говорить</button>
+  <button class="quick-btn" data-quick="Я атакую ближайшего противника!">⚔ Атаковать</button>
+  <button class="quick-btn" data-quick="Я устраиваю короткий привал.">🛌 Отдых</button>
+  <button class="quick-btn" data-quick="/roll 1d20">🎲 d20</button>
+  <button class="quick-btn" id="quick-custom-roll">🎲 Свой</button>
+  <button class="quick-btn" data-quick="/skills">🎯 Умения</button>
+  <button class="quick-btn" data-quick="/notes">📝 Заметки</button>
+</div>
+
+<div id="chat"></div>
+
+<div id="input-bar">
+  <textarea id="input" placeholder="Ваши действия..." rows="1"></textarea>
+  <button id="send-btn" aria-label="Отправить">➤</button>
+</div>
+
+<div id="drawer-bg"></div>
+<aside id="drawer">
+  <h2>Быстрые действия</h2>
+  <div class="drawer-section">
+    <button class="btn" data-action="dice">🎲 Бросок 1d20</button>
+    <button class="btn" data-action="dice-custom">🎲 Свой бросок...</button>
+    <button class="btn" data-action="sheet">📜 Полный лист</button>
+    <button class="btn" data-action="skills">🎯 Умения и навыки</button>
+    <button class="btn" data-action="notes">📝 Заметки <span class="drawer-badge" id="drawer-notes-badge" style="display:none">0</span></button>
+  </div>
+  <h2>Готовые миры</h2>
+  <div class="drawer-section" id="worlds-section"></div>
+  <h2>Озвучка</h2>
+  <div class="drawer-section">
+    <button class="btn" id="tts-toggle-btn">🔊 Автоозвучка: выкл</button>
+    <button class="btn" id="tts-last-btn">🔈 Озвучить последний</button>
+    <button class="btn" id="tts-speed-btn">⏩ Скорость: 1.0×</button>
+    <button class="btn" id="tts-voice-btn">🎙 Сменить голос</button>
+    <button class="btn" id="tts-stop-btn">⏹ Остановить</button>
+  </div>
+  <h2>Игра</h2>
+  <div class="drawer-section">
+    <button class="btn" data-action="save">💾 Сохранить</button>
+    <button class="btn" data-action="load">📂 Загрузить</button>
+    <button class="btn" data-action="reset">✨ Новая игра</button>
+    <button class="btn" data-action="help">❓ Справка</button>
+  </div>
+</aside>
+
+<div id="modal"><div class="modal-content" id="modal-content"></div></div>
+
+<script>
+let messages = [], state = null, busy = false;
+const chatEl = document.getElementById('chat');
+const inputEl = document.getElementById('input');
+const sendBtn = document.getElementById('send-btn');
+const drawerEl = document.getElementById('drawer');
+const drawerBg = document.getElementById('drawer-bg');
+const modalEl = document.getElementById('modal');
+const modalContent = document.getElementById('modal-content');
+const statusEl = document.getElementById('status');
+
+const LS_KEY = 'rpg_session_v9';
+const AVATAR_KEY = 'rpg_avatar_v1';
+const TTS_KEY = 'rpg_tts_v1';
+
+const EMPTY_STATE = {
+  name:"Пустой", race:"", class:"", background:"",
+  level:1, xp:0, xp_next:100,
+  hp:10, max_hp:10, gold:0,
+  stats:{str:10,dex:10,con:10,int:10,wis:10,cha:10},
+  proficiencies:[], skills:[], abilities:[],
+  inventory:[], notes:[], quests:[], conditions:[],
+  relationships:[], faction_clocks:[],
+  dc_modifier:0, dc_modifier_reasons:[],
+  position:"стоит", cover:"нет",
+  weapon_in_hand:"", restrained:false,
+  level_history:[], xp_event_ids:[], level_pending:0
+};
+
+const NOTE_TYPES = {
+  note:         { icon: '📝', label: 'Заметка' },
+  letter:       { icon: '✉',  label: 'Письмо' },
+  document:     { icon: '📜', label: 'Документ' },
+  notification: { icon: '🔔', label: 'Уведомление' },
+  rumor:        { icon: '💬', label: 'Слух' },
+  journal:      { icon: '📔', label: 'Дневник' }
+};
+
+const READY_WORLDS = [
+  { id: 'forgotten_realms', name: 'Забытые Королевства', desc: 'Классическое D&D. Шахта Фандальвера, гоблины, драконы.', prompt: 'Мир: Забытые Королевства. Начни приключение "Шахта Фандальвера". Я и мои спутники сопровождаем караван дворфа Гундрена Роксвика в город Фандалин. Начинается всё с засады гоблинов на дороге.' },
+  { id: 'ravenloft', name: 'Равенлофт (Готик-хоррор)', desc: 'Земля Баровия, вампир Страд, вечный туман и ужас.', prompt: 'Мир: Равенлофт (Баровия). Я и моя группа путников заблудились в тумане и вышли к мрачной земле. Начни с прибытия в Баровию.' },
+  { id: 'eberron', name: 'Эберрон (Стимпанк)', desc: 'Город Шарн, магия и механизмы, нуар и интриги.', prompt: 'Мир: Эберрон. Я — детектив в городе Шарн. Мне поручили расследовать кражу запретных магических технологий. Начни с прибытия на место преступления.' },
+  { id: 'spelljammer', name: 'Спеллджаммер (Космос)', desc: 'Космический галеон, астральное море, пираты.', prompt: 'Мир: Спеллджаммер. Я — капитан космического корабля. Мы перевозим таинственный груз через Астральное море. Начни с обнаружения неизвестного корабля позади.' },
+  { id: 'dark_sun', name: 'Тёмное Солнце (Пустоши)', desc: 'Выжженная пустыня, рабство, выживание, псионика.', prompt: 'Мир: Тёмное Солнце (Атас). Я — беглый раб в пустошах. Впереди — бескрайняя пустыня. Начни с поиска убежища на ночь.' },
+  { id: 'litrpg_apocalypse', name: 'LitRPG: Система', desc: 'Земля после Системы. Монстры, уровни, прокачка.', prompt: 'Мир: LitRPG. Система пришла на Землю. Я — обычный человек с интерфейсом уровня и характеристик. Начни с первой Системы и первого монстра.' }
+];
+
+function persist() { try { localStorage.setItem(LS_KEY, JSON.stringify({messages, state})); } catch(e){} }
+function restore() {
+  try {
+    const r = localStorage.getItem(LS_KEY);
+    if (!r) return null;
+    const d = JSON.parse(r);
+    if (d && Array.isArray(d.messages)) return d;
+  } catch(e){}
+  return null;
+}
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+/* POSITION / COVER */
+const POSITION_LABELS = {
+  'стоит': { icon: '🧍', label: 'Стоит', mod: 0 },
+  'сидит': { icon: '🪑', label: 'Сидит', mod: 0 },
+  'на коленях': { icon: '🧎', label: 'На коленях', mod: 1 },
+  'лежит': { icon: '🛌', label: 'Лежит', mod: 5 },
+  'верхом': { icon: '🐎', label: 'Верхом', mod: 0 },
+  'плавает': { icon: '🏊', label: 'Плавает', mod: 3 },
+  'висит': { icon: '🪜', label: 'Висит', mod: 3 },
+  'схвачен': { icon: '🤝', label: 'Схвачен', mod: 5 },
+  'обездвижен': { icon: '⛓', label: 'Обездвижен', mod: 99 }
+};
+const COVER_LABELS = {
+  'нет': { icon: '', label: 'Без укрытия', mod: 0 },
+  'половинное': { icon: '🛡½', label: 'Укрытие ½', mod: 2 },
+  'три_четверти': { icon: '🛡¾', label: 'Укрытие ¾', mod: 5 },
+  'полное': { icon: '🛡✓', label: 'Полное укрытие', mod: 99 }
+};
+function getPositionInfo(pos) { return POSITION_LABELS[pos] || { icon: '❔', label: pos || '—', mod: 0 }; }
+function getCoverInfo(cov) { return COVER_LABELS[cov] || { icon: '', label: cov || '—', mod: 0 }; }
+
+/* ═══════════ AVATAR — серверная цепочка провайдеров + офлайн-сигил ═══════════ */
+
+let avatarBusy = false;
+
+function cachedAvatarFor(name) {
+  try {
+    const data = JSON.parse(localStorage.getItem(AVATAR_KEY) || 'null');
+    if (data && data.name === name && data.url) return data;
+  } catch (e) {}
+  return null;
+}
+function saveAvatar(name, url, provider) {
+  try {
+    localStorage.setItem(AVATAR_KEY, JSON.stringify({name, url, provider, ts: Date.now()}));
+  } catch (e) {
+    // квота: пробуем сбросить старую запись
+    try { localStorage.removeItem(AVATAR_KEY); } catch (e2) {}
+  }
+}
+
+/* Детерминированный гербовый сигил: работает без сети, всегда одинаковый */
+function sigilAvatar(name) {
+  let h = 2166136261 >>> 0;
+  for (const ch of String(name || '?')) {
+    h ^= ch.codePointAt(0); h = Math.imul(h, 16777619) >>> 0;
+  }
+  const next = (n) => { h ^= h << 13; h >>>= 0; h ^= h >>> 17; h ^= h << 5; h >>>= 0; return h % n; };
+  const hue = next(360), hue2 = (hue + 140 + next(80)) % 360;
+  const S = 256, c = S / 2;
+  let strokes = '';
+  for (let i = 0; i < 8; i++) {
+    const a = (i / 8) * Math.PI * 2;
+    const r1 = 34 + next(26), r2 = 78 + next(34), w = 2 + next(3);
+    const x1 = c + Math.cos(a) * r1, y1 = c + Math.sin(a) * r1;
+    const x2 = c + Math.cos(a) * r2, y2 = c + Math.sin(a) * r2;
+    strokes += `<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" stroke-width="${w}"/>`;
+    if (next(2)) {
+      const b = a + 0.42, r3 = r1 + next(30);
+      strokes += `<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${(c + Math.cos(b) * r3).toFixed(1)}" y2="${(c + Math.sin(b) * r3).toFixed(1)}" stroke-width="${Math.max(1, w - 1)}"/>`;
+    }
+  }
+  let runes = '';
+  for (let i = 0; i < 5; i++) {
+    const y = 96 + i * 16, w = 8 + next(10);
+    runes += `<line x1="${c - w}" y1="${y}" x2="${c + w}" y2="${y + (next(3) - 1) * 6}"/>`;
+  }
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${S} ${S}" width="${S}" height="${S}">` +
+    `<defs><radialGradient id="g" cx="50%" cy="38%">` +
+    `<stop offset="0" stop-color="hsl(${hue2},42%,26%)"/>` +
+    `<stop offset="1" stop-color="hsl(${hue},35%,9%)"/></radialGradient></defs>` +
+    `<rect width="${S}" height="${S}" fill="url(#g)"/>` +
+    `<circle cx="${c}" cy="${c}" r="112" fill="none" stroke="hsl(${hue},55%,58%)" stroke-width="2" opacity="0.65"/>` +
+    `<circle cx="${c}" cy="${c}" r="98" fill="none" stroke="hsl(${hue},55%,58%)" stroke-width="1" opacity="0.3"/>` +
+    `<g stroke="hsl(${hue},62%,70%)" stroke-linecap="round" opacity="0.9">${strokes}</g>` +
+    `<g stroke="hsl(${hue2},60%,72%)" stroke-linecap="round" stroke-width="2" opacity="0.85">${runes}</g>` +
+    `</svg>`;
+  return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+}
+
+function paintAvatar(url, name) {
+  const wrap = document.querySelector('.avatar-wrap');
+  if (!wrap) return;
+  wrap.classList.remove('loading');
+  wrap.innerHTML = `<img src="${url}" alt="${esc(name)}">`;
+}
+
+async function generateAvatar(force) {
+  if (!state || !state.name || state.name === 'Пустой') return;
+  const wrap = document.querySelector('.avatar-wrap');
+  if (!wrap) return;
+
+  if (!force) {
+    const cached = cachedAvatarFor(state.name);
+    if (cached) { paintAvatar(cached.url, state.name); return; }
+  }
+  if (avatarBusy) return;              // уже запрошен — второй раз не бьём
+  avatarBusy = true;
+
+  wrap.classList.add('loading');
+  if (force) wrap.innerHTML = '<div class="avatar-placeholder">?</div>';
+
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 45000);
+  try {
+    const res = await fetch('/api/avatar', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({state, force: !!force}),
+      signal: ctrl.signal
+    });
+    if (res.status === 429) throw new Error('слишком часто — попробуйте позже');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const d = await res.json();
+    const url = d.url || d.data_url;
+    if (!d.ok || !url) {
+      const why = Object.entries(d.errors || {})
+        .map(([k, v]) => `${k}: ${v}`).join(' | ') || 'нет доступного провайдера';
+      throw new Error(why);
+    }
+    paintAvatar(url, state.name);
+    saveAvatar(state.name, url, d.provider);
+    if (force) addMsg('system', `🖼 Портрет обновлён (${d.provider}).`);
+  } catch (e) {
+    console.warn('[avatar]', e.message);
+    const fallback = sigilAvatar(state.name);
+    paintAvatar(fallback, state.name);
+    saveAvatar(state.name, fallback, 'sigil');
+    if (force) addMsg('system', 'Не удалось сгенерировать портрет: ' + e.message +
+      '\nПоказан офлайн-сигил.');
+  } finally {
+    clearTimeout(timer);
+    avatarBusy = false;
+  }
+}
+
+function maybeGenerateAvatar() {
+  if (!state || !state.name || state.name === 'Пустой') return;
+  const cached = cachedAvatarFor(state.name);
+  const wrap = document.querySelector('.avatar-wrap');
+  if (!wrap) return;
+  if (cached) paintAvatar(cached.url, state.name);
+  else generateAvatar(false);
+}
+
+function openAvatarModal() {
+  if (!state || !state.name || state.name === 'Пустой') {
+    addMsg('system', 'Имя персонажа ещё не определено. Сыграйте пару ходов.');
+    return;
+  }
+  const cached = cachedAvatarFor(state.name);
+  const imgSrc = cached ? cached.url : '';
+  const providerLine = cached && cached.provider
+    ? `<div style="text-align:center;font-size:11px;color:var(--text-secondary)">источник: ${esc(cached.provider)}</div>`
+    : '';
+  modalContent.innerHTML = `
+    <h3>🖼 Портрет: ${esc(state.name)}</h3>
+    ${imgSrc ? `<img class="avatar-large" src="${imgSrc}" alt="${esc(state.name)}">` : `<div style="text-align:center;padding:20px;color:var(--text-secondary)">Портрет ещё не сгенерирован</div>`}
+    ${providerLine}
+    <button class="btn primary" id="regen-avatar">⟳ Сгенерировать заново</button>
+    <button class="btn" onclick="document.getElementById('modal').classList.remove('open')">Закрыть</button>
+  `;
+  modalEl.classList.add('open');
+  document.getElementById('regen-avatar').onclick = () => {
+    localStorage.removeItem(AVATAR_KEY);
+    modalEl.classList.remove('open');
+    generateAvatar(true);
+  };
+}
+
+/* ═══════════ TTS ═══════════ */
+const tts = {
+  enabled: false, voice: null, rate: 1.0, speaking: false,
+  lastText: '', available: ('speechSynthesis' in window)
+};
+function ttsLoad() {
+  if (!tts.available) return;
+  const pickVoice = () => {
+    const voices = speechSynthesis.getVoices();
+    if (!voices.length) return;
+    const savedName = localStorage.getItem('rpg_tts_voice_name');
+    if (savedName) {
+      const v = voices.find(x => x.name === savedName);
+      if (v) { tts.voice = v; ttsUpdateUI(); return; }
+    }
+    const ru = voices.find(v => v.lang && v.lang.toLowerCase().startsWith('ru'));
+    tts.voice = ru || voices[0];
+    ttsUpdateUI();
+  };
+  pickVoice();
+  speechSynthesis.onvoiceschanged = pickVoice;
+  try {
+    const saved = JSON.parse(localStorage.getItem(TTS_KEY) || '{}');
+    if (typeof saved.enabled === 'boolean') tts.enabled = saved.enabled;
+    if (typeof saved.rate === 'number') tts.rate = saved.rate;
+  } catch(e){}
+  ttsUpdateUI();
+}
+function ttsSave() {
+  try {
+    localStorage.setItem(TTS_KEY, JSON.stringify({enabled: tts.enabled, rate: tts.rate}));
+    if (tts.voice) localStorage.setItem('rpg_tts_voice_name', tts.voice.name);
+  } catch(e){}
+}
+function ttsClean(text) {
+  return text
+    .replace(/\[\[.*?\]\]/g, '').replace(/\[.*?\]/g, '')
+    .replace(/\*+.*?\*+/g, '')
+    .replace(/[🎲🔊🔈⏩⏹🎙🖼📜💾📂✨❓🌍🔍🚶🗣⚔🛌🎒🎯🧍🪑🧎🐎🏊🪜🤝⛓🛡⭐📈✓✗●▶○🎁🏛👤📝✉🔔💬📔]/g, '')
+    .replace(/https?:\/\/\S+/g, '')
+    .replace(/[\u{1F000}-\u{1FAFF}]/gu, '')
+    .replace(/\s+/g, ' ').trim();
+}
+function ttsSpeak(text, btn) {
+  if (!tts.available) { addMsg('system', 'Озвучка не поддерживается.'); return; }
+  const clean = ttsClean(text);
+  if (!clean) return;
+  if (tts.speaking) speechSynthesis.cancel();
+  const utt = new SpeechSynthesisUtterance(clean);
+  if (tts.voice) utt.voice = tts.voice;
+  utt.lang = tts.voice ? tts.voice.lang : 'ru-RU';
+  utt.rate = tts.rate; utt.pitch = 1.0;
+  if (btn) btn.classList.add('playing');
+  utt.onstart = () => { tts.speaking = true; };
+  utt.onend = () => { tts.speaking = false; if (btn) btn.classList.remove('playing'); };
+  utt.onerror = () => { tts.speaking = false; if (btn) btn.classList.remove('playing'); };
+  speechSynthesis.speak(utt);
+}
+function ttsStop() {
+  if (tts.available) speechSynthesis.cancel();
+  tts.speaking = false;
+  document.querySelectorAll('.speak-btn.playing').forEach(b => b.classList.remove('playing'));
+}
+function ttsUpdateUI() {
+  const btn = document.getElementById('tts-toggle-btn');
+  if (btn) {
+    btn.textContent = `🔊 Автоозвучка: ${tts.enabled ? 'вкл' : 'выкл'}`;
+    btn.classList.toggle('tts-active', tts.enabled);
+  }
+  const sp = document.getElementById('tts-speed-btn');
+  if (sp) sp.textContent = `⏩ Скорость: ${tts.rate.toFixed(1)}×`;
+  const vb = document.getElementById('tts-voice-btn');
+  if (vb) {
+    if (tts.voice) {
+      const short = tts.voice.name.length > 22 ? tts.voice.name.substring(0, 22) + '…' : tts.voice.name;
+      vb.textContent = `🎙 Голос: ${short}`;
+    } else vb.textContent = '🎙 Голос: не выбран';
+  }
+}
+function ttsPickVoice() {
+  if (!tts.available) return;
+  const voices = speechSynthesis.getVoices();
+  if (!voices.length) { addMsg('system', 'Голоса ещё загружаются.'); return; }
+  const ruVoices = voices.filter(v => v.lang && v.lang.toLowerCase().startsWith('ru'));
+  const list = (ruVoices.length ? ruVoices : voices).slice(0, 20);
+  return new Promise(res => {
+    modalContent.innerHTML = `<h3>🎙 Выбор голоса</h3>
+      <div style="display:flex;flex-direction:column;gap:6px;max-height:50vh;overflow-y:auto">
+        ${list.map((v, i) => `
+          <div class="save-item" data-i="${i}" style="${tts.voice && tts.voice.name === v.name ? 'border-color:var(--accent-gold)' : ''}">
+            <div style="color:var(--text-primary);font-size:14px">${esc(v.name)}</div>
+            <div style="color:var(--text-secondary);font-size:11px">${esc(v.lang)}${v.default ? ' · по умолчанию' : ''}</div>
+          </div>
+        `).join('')}
+      </div>
+      <button class="btn" id="modal-cancel">Закрыть</button>`;
+    modalEl.classList.add('open');
+    const close = v => { modalEl.classList.remove('open'); res(v); };
+    modalContent.querySelectorAll('.save-item').forEach(el => {
+      el.onclick = () => {
+        const idx = parseInt(el.dataset.i);
+        tts.voice = list[idx];
+        ttsSave(); ttsUpdateUI();
+        close(tts.voice);
+        addMsg('system', `Голос: ${tts.voice.name}`);
+      };
+    });
+    document.getElementById('modal-cancel').onclick = () => close(null);
+  });
+}
+document.getElementById('tts-toggle-btn').onclick = () => {
+  tts.enabled = !tts.enabled;
+  ttsSave(); ttsUpdateUI();
+  if (!tts.enabled) ttsStop();
+  if (tts.enabled && tts.available) {
+    try {
+      const unlock = new SpeechSynthesisUtterance(' ');
+      unlock.volume = 0;
+      speechSynthesis.speak(unlock);
+    } catch(e){}
+  }
+};
+document.getElementById('tts-last-btn').onclick = () => {
+  if (tts.lastText) ttsSpeak(tts.lastText, null);
+  else addMsg('system', 'Ещё нет ответа мастера.');
+};
+document.getElementById('tts-speed-btn').onclick = () => {
+  const speeds = [0.8, 1.0, 1.2, 1.5, 1.8];
+  const i = speeds.findIndex(s => Math.abs(s - tts.rate) < 0.01);
+  tts.rate = speeds[(i + 1) % speeds.length];
+  ttsSave(); ttsUpdateUI();
+};
+document.getElementById('tts-voice-btn').onclick = () => ttsPickVoice();
+document.getElementById('tts-stop-btn').onclick = () => ttsStop();
+
+/* NOTES BADGE */
+function updateNotesBadge() {
+  const notes = state?.notes || [];
+  const unread = notes.filter(n => n.unread).length;
+  const badge = document.getElementById('drawer-notes-badge');
+  if (badge) {
+    if (unread > 0) {
+      badge.textContent = unread;
+      badge.style.display = 'inline-block';
+    } else {
+      badge.style.display = 'none';
+    }
+  }
+  const chip = document.getElementById('status-notes-chip');
+  if (chip) chip.remove();
+  if (unread > 0) {
+    const chips = document.querySelector('.status-chips');
+    if (chips) {
+      const s = document.createElement('span');
+      s.id = 'status-notes-chip';
+      s.className = 'status-chip notes';
+      s.textContent = `📝 ${unread} новых`;
+      s.onclick = () => doNotes();
+      chips.appendChild(s);
+    }
+  }
+}
+
+/* STATUS */
+function renderStatus() {
+  if (!state) { statusEl.innerHTML = ''; return; }
+  const hpPct = state.max_hp ? Math.max(0, Math.min(100, state.hp / state.max_hp * 100)) : 0;
+  const xpPct = state.xp_next ? Math.max(0, Math.min(100, state.xp / state.xp_next * 100)) : 0;
+  const c = (state.conditions || []).length
+    ? ' · ' + state.conditions.map(x => `<span style="color:#d45a5a">${esc(x)}</span>`).join(', ')
+    : '';
+  const raceClass = [state.race, state.class].filter(Boolean).join(' · ');
+  const dc = state.dc_modifier || 0;
+  let dcChip = '';
+  if (dc !== 0) {
+    const cls = dc > 0 ? 'dc-up' : 'dc-down';
+    const sign = dc > 0 ? '+' : '';
+    dcChip = `<span class="status-chip ${cls}" title="${esc((state.dc_modifier_reasons||[]).join(', '))}">🎯 Сложность ${sign}${dc}</span>`;
+  }
+  const posInfo = getPositionInfo(state.position);
+  const covInfo = getCoverInfo(state.cover);
+  const posChip = state.position && state.position !== 'стоит'
+    ? `<span class="status-chip pos">${posInfo.icon} ${esc(posInfo.label)}</span>` : '';
+  const covChip = state.cover && state.cover !== 'нет'
+    ? `<span class="status-chip cover">${covInfo.icon} ${esc(covInfo.label)}</span>` : '';
+  const restrChip = state.restrained
+    ? `<span class="status-chip dc-up">⛓ Связан</span>` : '';
+  statusEl.innerHTML = `
+    <div class="status-top">
+      <div class="avatar-wrap" title="Нажмите, чтобы увидеть портрет">
+        <div class="avatar-placeholder">?</div>
+      </div>
+      <div class="status-info">
+        <div class="status-name">${esc(state.name || 'Пустой')}</div>
+        ${raceClass ? `<div class="status-sub">${esc(raceClass)}</div>` : ''}
+        <div class="status-chips">
+          <span class="status-chip">Ур. ${state.level}</span>
+          ${state.level_pending ? `<span class="status-chip" title="Обсуди повышение с мастером">⬆ Повышение!</span>` : ''}
+          <span class="status-chip">💰 ${state.gold}</span>
+          ${posChip}
+          ${covChip}
+          ${restrChip}
+          ${dcChip}
+        </div>
+      </div>
+    </div>
+    <div class="status-row"><span style="color:#d45a5a;font-size:11px;width:20px">HP</span>
+      <div class="bar-wrap"><div class="bar-fill bar-hp" style="width:${hpPct}%"></div></div>
+      <span class="bar-label">${state.hp}/${state.max_hp}</span></div>
+    <div class="status-row"><span style="color:#5a8ed4;font-size:11px;width:20px">XP</span>
+      <div class="bar-wrap"><div class="bar-fill bar-xp" style="width:${xpPct}%"></div></div>
+      <span class="bar-label">${state.xp}/${state.xp_next}</span></div>
+    ${c ? `<div class="status-row" style="font-size:12px;color:var(--text-secondary)">${c}</div>` : ''}`;
+  const wrap = statusEl.querySelector('.avatar-wrap');
+  if (wrap) wrap.onclick = openAvatarModal;
+  maybeGenerateAvatar();
+  updateNotesBadge();
+}
+
+/* CHAT */
+function scrollBottom() { chatEl.scrollTop = chatEl.scrollHeight; }
+function addMsg(role, text) {
+  const d = document.createElement('div');
+  d.className = 'msg ' + role;
+  if (role === 'master') {
+    const textSpan = document.createElement('span');
+    textSpan.textContent = text;
+    d.appendChild(textSpan);
+    if (tts.available) {
+      const btn = document.createElement('button');
+      btn.className = 'speak-btn';
+      btn.textContent = '🔊';
+      btn.title = 'Озвучить';
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        if (btn.classList.contains('playing')) ttsStop();
+        else ttsSpeak(text, btn);
+      };
+      d.appendChild(btn);
+    }
+  } else {
+    d.textContent = text;
+  }
+  chatEl.appendChild(d);
+  scrollBottom();
+  return d;
+}
+function addHtmlMsg(role, html) {
+  const d = document.createElement('div');
+  d.className = 'msg ' + role; d.innerHTML = html;
+  chatEl.appendChild(d); scrollBottom(); return d;
+}
+
+/* API CALLS */
+async function callAI(msgs) {
+  busy = true; sendBtn.disabled = true;
+  document.querySelectorAll('.quick-btn').forEach(b => b.disabled = true);
+  if (tts.speaking) ttsStop();
+  const md = document.createElement('div');
+  md.className = 'msg master typing-indicator';
+  chatEl.appendChild(md); scrollBottom();
+  let full = '';
+  try {
+    const res = await fetch('/api/chat', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({messages: msgs, state})
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const reader = res.body.getReader(); const dec = new TextDecoder();
+    md.classList.remove('typing-indicator');
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      const c = dec.decode(value, {stream: true});
+      if (!c) continue;
+      full += c; md.textContent = full; scrollBottom();
+    }
+    const t = dec.decode();
+    if (t) { full += t; md.textContent = full; scrollBottom(); }
+  } catch(e) {
+    md.classList.remove('typing-indicator');
+    md.textContent = (full || '') + `\n[Ошибка: ${e.message}]`;
+  }
+  if (full.trim() && full.includes('[Ошибка API:')) {
+    md.remove();
+    addMsg('system', full.trim() + '\n\nОтвет не добавлен в историю игры. Можно повторить отправку.');
+    full = '';
+  }
+  if (full.trim()) {
+    messages.push({role: 'assistant', content: full});
+    persist();
+    md.remove();
+    const finalMsg = addMsg('master', full);
+    tts.lastText = full;
+    if (tts.enabled && tts.available) {
+      setTimeout(() => {
+        const btn = finalMsg.querySelector('.speak-btn');
+        ttsSpeak(full, btn);
+      }, 60);
+    }
+    await updateState();
+  }
+  busy = false; sendBtn.disabled = false;
+  document.querySelectorAll('.quick-btn').forEach(b => b.disabled = false);
+  inputEl.focus();
+}
+async function updateState() {
+  if (!state) state = {...EMPTY_STATE};
+  try {
+    const res = await fetch('/api/state', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({messages, state})
+    });
+    if (res.ok) {
+      const oldLevel = Number(state.level || 1);
+      state = await res.json();
+      if (Number(state.level || 1) > oldLevel) {
+        const gained = Number(state.level) - oldLevel;
+        addMsg('system', `🎉 Доступно повышение уровня: ${state.level} (получено уровней: ${gained}). Обсуди с мастером выбор повышения характеристик и умения.`);
+      }
+      renderStatus(); persist();
+    }
+  } catch(e){}
+}
+
+/* SEND */
+async function sendMessage(text) {
+  if (busy) return;
+  text = (text || '').trim();
+  if (!text) return;
+  if (text.startsWith('/')) {
+    const [c, ...r] = text.split(/\s+/);
+    inputEl.value = ''; autosize();
+    handleCommand(c.toLowerCase(), r.join(' '));
+    return;
+  }
+  addMsg('user', text);
+  messages.push({role: 'user', content: text});
+  persist();
+  inputEl.value = ''; autosize();
+  await callAI(messages);
+}
+function handleCommand(cmd, arg) {
+  switch(cmd) {
+    case '/roll': return doRoll(arg || '1d20');
+    case '/sheet': return doSheet();
+    case '/skills': return doSkills();
+    case '/notes': return doNotes();
+    case '/save': return doSave(arg);
+    case '/load': return doLoad(arg);
+    case '/reset': return doReset();
+    case '/help': return doHelp();
+    default: addMsg('system', `Неизвестная команда: ${cmd}. Введите /help.`);
+  }
+}
+async function doRoll(expr) {
+  if (busy) return;
+  const animDiv = addHtmlMsg('dice',
+    `<span class="dice-emoji">🎲</span> Бросок ${esc(expr)}...`);
+  await new Promise(r => setTimeout(r, 450));
+  animDiv.remove();
+  try {
+    const res = await fetch('/api/roll', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({expr})
+    });
+    const d = await res.json();
+    if (d.error) { addMsg('system', 'Ошибка броска: ' + d.error); return; }
+    const m = d.mod ? (d.mod > 0 ? '+' + d.mod : '' + d.mod) : '';
+    addHtmlMsg('dice', `🎲 <b>${esc(d.expr)}</b> → [${d.rolls.join(', ')}]${m} = <b>${d.total}</b>`);
+    messages.push({role: 'user', content:
+      `[[БРОСОК]] ${d.expr} → [${d.rolls.join(', ')}]${m} = ${d.total}. Сравни с DC, который ты объявил ранее. Опиши результат, успех/провал/осложнение. Не решай за игрока.`});
+    persist(); await callAI(messages);
+  } catch(e) { addMsg('system', 'Ошибка: ' + e.message); }
+}
+
+/* SHEET */
+async function doSheet() {
+  if (!state) return;
+  const s = state.stats || {};
+  const quests = (state.quests || []).map(q => {
+    if (typeof q === 'string') {
+      return { id: 'old-' + q, name: q, type: 'side', status: 'active',
+               chain: '', chain_order: 0, stages: [], current_stage: 0,
+               rewards: {}, giver: '', location: '' };
+    }
+    return q;
+  });
+
+  const inv = (state.inventory || []).length
+    ? state.inventory.map(i => `<span class="tag">${esc(i)}</span>`).join('')
+    : '<span class="tag empty">пусто</span>';
+  const cd = (state.conditions || []).length
+    ? state.conditions.map(c => `<span class="tag">${esc(c)}</span>`).join('')
+    : '<span class="tag empty">нет</span>';
+
+  const typeInfo = {
+    main: { icon: '⭐', label: 'Главный', color: '#c9a227' },
+    side: { icon: '📜', label: 'Побочный', color: '#5a8ed4' },
+    personal: { icon: '👤', label: 'Личный', color: '#b48cff' },
+    faction: { icon: '🏛', label: 'Фракция', color: '#7fbf7f' }
+  };
+
+  function renderQuest(q) {
+    const t = typeInfo[q.type] || typeInfo.side;
+    const isCompleted = q.status === 'completed';
+    const isFailed = q.status === 'failed';
+    const statusIcon = isCompleted ? '✓' : (isFailed ? '✗' : '●');
+    const statusColor = isCompleted ? '#5a5a4e' : (isFailed ? '#d45a5a' : t.color);
+    const stages = (q.stages || []).map((st, i) => {
+      const mark = st.done ? '✓' : (i === (q.current_stage || 0) ? '▶' : '○');
+      const color = st.done ? '#5a5a4e' : (i === (q.current_stage || 0) ? 'var(--text-primary)' : 'var(--text-secondary)');
+      const strike = st.done ? 'text-decoration:line-through;' : '';
+      return `<div style="font-size:12px;color:${color};${strike}margin:2px 0">${mark} ${esc(st.text || '')}</div>`;
+    }).join('');
+    const rewards = q.rewards && Object.keys(q.rewards).length
+      ? `<div style="font-size:11px;color:var(--text-secondary);margin-top:4px">
+           🎁 ${q.rewards.xp ? `+${q.rewards.xp} XP` : ''}
+           ${q.rewards.gold ? ` · +${q.rewards.gold}💰` : ''}
+           ${q.rewards.items && q.rewards.items.length ? ' · ' + q.rewards.items.map(esc).join(', ') : ''}
+         </div>`
+      : '';
+    return `<div class="ability-card" style="border-color:${statusColor};${isCompleted ? 'opacity:0.55;' : ''}">
+      <div class="ability-header">
+        <span class="ability-name" style="color:${statusColor}">${statusIcon} ${t.icon} ${esc(q.name || '—')}</span>
+      </div>
+      <div style="font-size:11px;color:${statusColor};margin-bottom:4px">${t.label}${q.giver ? ' · от ' + esc(q.giver) : ''}${q.location ? ' · ' + esc(q.location) : ''}</div>
+      <div>${stages || '<div style="font-size:12px;color:var(--text-secondary);font-style:italic">— нет этапов —</div>'}</div>
+      ${rewards}
+    </div>`;
+  }
+
+  const activeQuests = quests.filter(q => q.status === 'active');
+  const completedQuests = quests.filter(q => q.status === 'completed' || q.status === 'failed');
+  const questsBlock = activeQuests.length
+    ? activeQuests.map(renderQuest).join('')
+    : '<div class="tag empty">нет активных квестов</div>';
+  const completedBlock = completedQuests.length
+    ? `<details style="margin-top:8px"><summary style="cursor:pointer;color:var(--text-secondary);font-size:12px">Выполненные (${completedQuests.length})</summary><div style="margin-top:6px">${completedQuests.map(renderQuest).join('')}</div></details>`
+    : '';
+
+  const lvlHist = (state.level_history || []).length
+    ? state.level_history.map(h =>
+        `<div style="font-size:12px;color:var(--text-secondary);padding:3px 0;border-bottom:1px solid var(--border-subtle)">
+          <b style="color:var(--text-primary)">Ур. ${h.level}</b>
+          · ${esc(h.hp || '')} HP
+          ${h.stats ? ' · ' + esc(h.stats) : ''}
+          ${h.abilities ? ' · ' + esc(h.abilities) : ''}
+        </div>`
+      ).join('')
+    : '<div class="tag empty">первый уровень — история пуста</div>';
+
+  const dc = state.dc_modifier || 0;
+  const dcBoxCls = dc > 0 ? 'up' : (dc < 0 ? 'down' : '');
+  const dcSign = dc > 0 ? '+' : '';
+  const dcReasons = (state.dc_modifier_reasons || []).length
+    ? state.dc_modifier_reasons.map(r => `<span class="tag warn">${esc(r)}</span>`).join('')
+    : '<span class="tag empty">нет модификаторов</span>';
+  const dcBox = `
+    <div class="dc-box ${dcBoxCls}">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <span style="color:var(--text-secondary);font-size:12px">🎯 Модификатор сложности</span>
+        <span class="dc-val ${dc === 0 ? 'neutral' : ''}">${dc === 0 ? '0' : dcSign + dc}</span>
+      </div>
+      <div class="tags">${dcReasons}</div>
+    </div>`;
+
+  const posInfo = getPositionInfo(state.position);
+  const covInfo = getCoverInfo(state.cover);
+  const situationBox = `
+    <div class="situation-box">
+      <div style="color:var(--text-secondary);font-size:12px;margin-bottom:6px">📍 Положение и обстановка</div>
+      <div class="sit-row"><span class="lbl">Позиция</span><span class="val ${posInfo.mod !== 0 ? 'warn' : ''}">${posInfo.icon} ${esc(posInfo.label)}</span></div>
+      <div class="sit-row"><span class="lbl">Укрытие</span><span class="val">${covInfo.icon || '—'} ${esc(covInfo.label)}</span></div>
+      <div class="sit-row"><span class="lbl">В руках</span><span class="val">${esc(state.weapon_in_hand || '—')}</span></div>
+      ${state.restrained ? `<div class="sit-row"><span class="lbl">Связан</span><span class="val warn">⛓ Да</span></div>` : ''}
+    </div>`;
+
+  const statMod = (val) => {
+    const m = Math.floor((val - 10) / 2);
+    return m >= 0 ? '+' + m : '' + m;
+  };
+  const cached = cachedAvatarFor(state.name);
+  const avatar = cached
+    ? `<img class="avatar-large" src="${cached.url}" alt="${esc(state.name)}" style="width:140px;height:140px">`
+    : '';
+
+  const notesCount = (state.notes || []).length;
+  const notesUnread = (state.notes || []).filter(n => n.unread).length;
+
+  modalContent.innerHTML = `
+    ${avatar}
+    <h3>📜 ${esc(state.name || 'Пустой')}</h3>
+    ${state.race || state.class ? `<div class="kv"><span class="k">Раса · Класс</span><span class="v">${esc(state.race || '—')} · ${esc(state.class || '—')}</span></div>` : ''}
+    ${state.background ? `<div class="kv"><span class="k">Предыстория</span><span class="v">${esc(state.background)}</span></div>` : ''}
+    <div class="kv"><span class="k">Уровень</span><span class="v">${state.level}${state.level_pending ? ` · повышение доступно (${state.level_pending})` : ''}</span></div>
+    <div class="kv"><span class="k">Опыт</span><span class="v">${state.xp} / ${state.xp_next}</span></div>
+    <div class="kv"><span class="k">Здоровье</span><span class="v">${state.hp} / ${state.max_hp}</span></div>
+    <div class="kv"><span class="k">Золото</span><span class="v">${state.gold}</span></div>
+    <h3 style="margin-top:12px;font-size:15px">Характеристики</h3>
+    <div class="stats-grid">${['str','dex','con','int','wis','cha'].map(k =>
+      `<div class="stat-box"><div class="lbl">${k.toUpperCase()}</div><div class="val">${s[k] || 10}</div><div class="mod">${statMod(s[k] || 10)}</div></div>`
+    ).join('')}</div>
+    ${situationBox}
+    ${dcBox}
+    <h3 style="margin-top:12px;font-size:15px">🎯 Квесты</h3>
+    <div>${questsBlock}${completedBlock}</div>
+    <h3 style="margin-top:12px;font-size:15px">📈 Прокачка</h3>
+    <div>${lvlHist}</div>
+    <h3 style="margin-top:12px;font-size:15px">🎒 Инвентарь</h3><div class="tags">${inv}</div>
+    <h3 style="margin-top:12px;font-size:15px">Состояния</h3><div class="tags">${cd}</div>
+    <button class="btn" style="margin-top:8px" onclick="document.getElementById('modal').classList.remove('open');doNotes();">📝 Заметки (${notesCount}${notesUnread > 0 ? ', ' + notesUnread + ' новых' : ''})</button>
+    <button class="btn" style="margin-top:4px" onclick="document.getElementById('modal').classList.remove('open');doSkills();">🎯 Умения и навыки</button>
+    <button class="btn primary" style="margin-top:4px" onclick="document.getElementById('modal').classList.remove('open')">Закрыть</button>`;
+  modalEl.classList.add('open');
+}
+
+/* NOTES — отдельная вкладка */
+async function doNotes() {
+  if (!state) return;
+  const notes = (state.notes || []).slice();
+
+  const typeOrder = ['notification', 'letter', 'document', 'journal', 'note', 'rumor'];
+  const types = [...new Set(notes.map(n => n.type || 'note'))].sort((a, b) => {
+    const ia = typeOrder.indexOf(a); const ib = typeOrder.indexOf(b);
+    return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+  });
+
+  let activeFilter = 'all';
+
+  function renderList() {
+    const filtered = activeFilter === 'all' ? notes : notes.filter(n => (n.type || 'note') === activeFilter);
+    const sorted = filtered.slice().sort((a, b) => {
+      if (a.unread !== b.unread) return a.unread ? -1 : 1;
+      return 0;
+    });
+
+    const counts = { all: notes.length };
+    types.forEach(t => { counts[t] = notes.filter(n => (n.type || 'note') === t).length; });
+
+    const tabsHtml = `
+      <div class="note-tabs">
+        <div class="note-tab ${activeFilter === 'all' ? 'active' : ''}" data-filter="all">Все (${counts.all})</div>
+        ${types.map(t => {
+          const info = NOTE_TYPES[t] || NOTE_TYPES.note;
+          return `<div class="note-tab ${activeFilter === t ? 'active' : ''}" data-filter="${t}">${info.icon} ${info.label} (${counts[t]})</div>`;
+        }).join('')}
+      </div>`;
+
+    const listHtml = sorted.length ? sorted.map(n => {
+      const info = NOTE_TYPES[n.type] || NOTE_TYPES.note;
+      const unreadClass = n.unread ? 'unread' : '';
+      const contentClass = n._expanded ? 'expanded' : '';
+      const metaParts = [];
+      if (n.source) metaParts.push(`от: ${esc(n.source)}`);
+      if (n.date) metaParts.push(esc(n.date));
+      return `
+        <div class="note-card ${unreadClass}" data-id="${esc(n.id)}">
+          <div class="note-header">
+            <span class="note-title">${info.icon} ${esc(n.title || '(без названия)')}</span>
+            <span class="note-type-badge">${info.label}</span>
+          </div>
+          ${metaParts.length ? `<div class="note-meta">${metaParts.join(' · ')}</div>` : ''}
+          <div class="note-content ${contentClass}" data-content-id="${esc(n.id)}">${esc(n.content || '')}</div>
+          <div class="note-actions">
+            ${n.unread ? `<button class="note-action-btn" data-action="read" data-id="${esc(n.id)}">✓ Прочитано</button>` : ''}
+            <button class="note-action-btn" data-action="delete" data-id="${esc(n.id)}">🗑 Удалить</button>
+          </div>
+        </div>`;
+    }).join('') : '<div class="tag empty">нет заметок</div>';
+
+    modalContent.innerHTML = `
+      <h3>📝 Заметки</h3>
+      ${tabsHtml}
+      <div style="max-height:50vh;overflow-y:auto;margin-top:8px">${listHtml}</div>
+      <button class="btn primary" style="margin-top:6px" onclick="document.getElementById('modal').classList.remove('open')">Закрыть</button>`;
+
+    // Обработчики
+    modalContent.querySelectorAll('.note-tab').forEach(tab => {
+      tab.onclick = () => { activeFilter = tab.dataset.filter; renderList(); };
+    });
+    modalContent.querySelectorAll('.note-card').forEach(card => {
+      card.onclick = (e) => {
+        // Клик по кнопке — обрабатываем отдельно
+        if (e.target.closest('.note-action-btn')) return;
+        const id = card.dataset.id;
+        const note = notes.find(n => n.id === id);
+        if (note) {
+          note._expanded = !note._expanded;
+          // Раскрытие = прочитано
+          if (note.unread) {
+            note.unread = false;
+            saveNotesToState();
+          }
+          renderList();
+        }
+      };
+    });
+    modalContent.querySelectorAll('.note-action-btn').forEach(btn => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const id = btn.dataset.id;
+        const action = btn.dataset.action;
+        const idx = notes.findIndex(n => n.id === id);
+        if (idx === -1) return;
+        if (action === 'read') {
+          notes[idx].unread = false;
+        } else if (action === 'delete') {
+          notes.splice(idx, 1);
+        }
+        saveNotesToState();
+        renderList();
+        updateNotesBadge();
+      };
+    });
+  }
+
+  function saveNotesToState() {
+    // Убираем служебное поле _expanded перед сохранением
+    state.notes = notes.map(n => {
+      const copy = { ...n };
+      delete copy._expanded;
+      return copy;
+    });
+    persist();
+    renderStatus();
+  }
+
+  renderList();
+  modalEl.classList.add('open');
+}
+
+/* SKILLS */
+async function doSkills() {
+  if (!state) return;
+  const prof = (state.proficiencies || []).length
+    ? state.proficiencies.map(p => `<span class="tag">${esc(p)}</span>`).join('')
+    : '<span class="tag empty">нет владений</span>';
+  const skills = (state.skills || []).length
+    ? state.skills.map(sk => {
+        const bonus = sk.bonus >= 0 ? '+' + sk.bonus : '' + sk.bonus;
+        return `<span class="tag skill" title="${esc(sk.source || '')}">${esc(sk.name)} ${bonus}</span>`;
+      }).join('')
+    : '<span class="tag empty">нет навыков</span>';
+  const abilities = (state.abilities || []).length
+    ? state.abilities.map(a => {
+        const isPassive = a.recharge === 'passive' || !a.uses_max;
+        const usesText = isPassive ? '∞' : `${a.uses_left ?? a.uses_max}/${a.uses_max}`;
+        const isEmpty = !isPassive && (a.uses_left || 0) === 0;
+        const rechargeLabel = {
+          'passive': 'пассивное',
+          'short_rest': 'короткий отдых',
+          'long_rest': 'долгий отдых',
+          'day': 'раз в день'
+        }[a.recharge] || '';
+        return `<div class="ability-card ${isPassive ? 'passive' : ''}">
+          <div class="ability-header">
+            <span class="ability-name">${esc(a.name)}</span>
+            <span class="ability-uses ${isEmpty ? 'empty' : ''}">${usesText}</span>
+          </div>
+          <div class="ability-desc">${esc(a.description || '')}</div>
+          ${rechargeLabel ? `<div class="ability-recharge">⟳ ${esc(rechargeLabel)}</div>` : ''}
+        </div>`;
+      }).join('')
+    : '<div class="tag empty">нет умений</div>';
+  modalContent.innerHTML = `
+    <h3>🎯 ${esc(state.name || 'Пустой')} — Умения</h3>
+    ${state.race || state.class || state.background ? `
+      <div style="font-size:13px;color:var(--text-secondary)">
+        ${[state.race, state.class, state.background].filter(Boolean).map(esc).join(' · ')}
+      </div>
+    ` : ''}
+    <h3 style="margin-top:14px;font-size:15px">Активные умения</h3>
+    <div>${abilities}</div>
+    <h3 style="margin-top:14px;font-size:15px">Пассивные навыки</h3>
+    <div class="tags">${skills}</div>
+    <h3 style="margin-top:14px;font-size:15px">Владения</h3>
+    <div class="tags">${prof}</div>
+    <button class="btn" style="margin-top:10px" onclick="document.getElementById('modal').classList.remove('open');doSheet();">📜 Полный лист</button>
+    <button class="btn primary" style="margin-top:4px" onclick="document.getElementById('modal').classList.remove('open')">Закрыть</button>`;
+  modalEl.classList.add('open');
+}
+
+/* SAVE / LOAD / RESET / HELP */
+async function doSave(name) {
+  if (!name) {
+    name = await promptModal('Название сохранения', 'game-' + Date.now());
+    if (!name) return;
+  }
+  try {
+    const res = await fetch('/api/save', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name, messages, state})
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const d = await res.json();
+    if (!d.ok) throw new Error(d.error || 'не удалось сохранить');
+    addMsg('system', `💾 Сохранено: «${d.name}»`);
+  } catch(e) { addMsg('system', 'Ошибка сохранения: ' + e.message); }
+}
+async function doLoad(name) {
+  let saves;
+  try { saves = await (await fetch('/api/saves')).json(); }
+  catch(e) { addMsg('system', 'Ошибка: ' + e.message); return; }
+  if (!saves.length) { addMsg('system', 'Нет сохранений.'); return; }
+  if (!name) {
+    name = await listModal('Выберите сохранение', saves);
+    if (!name) return;
+  }
+  try {
+    const res = await fetch('/api/load/' + encodeURIComponent(name));
+    if (!res.ok) throw new Error('не найдено');
+    const d = await res.json();
+    messages = d.messages || [];
+    state = d.state || {...EMPTY_STATE};
+    persist(); renderAll(); renderStatus();
+    addMsg('system', `📂 Загружено: «${name}»`);
+  } catch(e) { addMsg('system', 'Ошибка: ' + e.message); }
+}
+function doReset() {
+  if (!confirm('Начать новую игру? Текущая история будет потеряна.')) return;
+  messages = []; state = {...EMPTY_STATE};
+  try { localStorage.removeItem(AVATAR_KEY); } catch(e){}
+  ttsStop();
+  persist(); chatEl.innerHTML = ''; renderStatus(); showIntro();
+}
+function doHelp() {
+  addHtmlMsg('system', 'Команды:<br><code>/roll 1d20+3</code> — бросок<br>' +
+    '<code>/sheet</code> — полный лист<br><code>/skills</code> — умения и навыки<br>' +
+    '<code>/notes</code> — заметки, письма, документы<br>' +
+    '<code>/save имя</code> — сохранить<br><code>/load имя</code> — загрузить<br>' +
+    '<code>/reset</code> — новая игра<br><br>' +
+    'Заметки, письма, документы, слухи — в отдельной вкладке 📝, не в инвентаре.<br>' +
+    'XP начисляется за убийства, победы без убийства и завершённые квесты.<br>' +
+    'Портрет генерируется на сервере (цепочка провайдеров); клик по аватару — посмотреть и перегенерировать.');
+}
+function renderAll() {
+  chatEl.innerHTML = '';
+  messages.forEach(m => {
+    if (m.role === 'user') {
+      const c = m.content.replace(/^\[\[(БРОСОК|СИСТЕМА)\]\]\s*/, '');
+      addMsg('user', c);
+    } else if (m.role === 'assistant') {
+      addMsg('master', m.content);
+    }
+  });
+  const lastMaster = [...messages].reverse().find(m => m.role === 'assistant');
+  if (lastMaster) tts.lastText = lastMaster.content;
+}
+function showIntro() {
+  addMsg('system', 'Опишите персонажа, мир, тон и стартовую ситуацию.\n' +
+    'Например: «Я — эльф-плут Кейр, Преступник. Тёмное фэнтези, город на болоте. Начинаю в камере.»\n\n' +
+    'Мастер выставит характеристики, навыки, умения. XP за убийства и квесты начисляется автоматически.\n' +
+    'Письма, документы и слухи — в отдельной вкладке 📝 Заметки.');
+}
+function renderWorlds() {
+  const container = document.getElementById('worlds-section');
+  if (!container) return;
+  container.innerHTML = READY_WORLDS.map(w => `
+    <button class="btn" data-world-id="${w.id}" title="${esc(w.desc)}">🌍 ${esc(w.name)}</button>
+  `).join('');
+  container.querySelectorAll('.btn').forEach(btn => {
+    btn.onclick = () => {
+      const world = READY_WORLDS.find(w => w.id === btn.dataset.worldId);
+      if (!world || busy) return;
+      drawerEl.classList.remove('open');
+      drawerBg.classList.remove('open');
+      messages = []; state = {...EMPTY_STATE};
+      try { localStorage.removeItem(AVATAR_KEY); } catch(e){}
+      ttsStop();
+      chatEl.innerHTML = '';
+      renderStatus();
+      addMsg('system', `Выбран мир: ${world.name}\n${world.desc}\n\nОпишите персонажа: раса, класс, имя, предыстория.`);
+      messages.push({role: 'user', content: world.prompt + ' Если я не описал персонажа — сначала предложи 2–3 варианта расы, класса и предыстории на выбор.'});
+      persist();
+      callAI(messages);
+    };
+  });
+}
+
+/* DICE MODAL */
+function rollModal() {
+  return new Promise(res => {
+    const presets = ['1d4', '1d6', '1d8', '1d10', '1d12', '1d20', '2d6', '1d100'];
+    modalContent.innerHTML = `<h3>🎲 Бросок кубика</h3>
+      <div style="display:flex;flex-wrap:wrap;gap:6px">
+        ${presets.map(p => `<button class="dice-preset" data-preset="${p}">${p}</button>`).join('')}
+      </div>
+      <input id="modal-input" type="text" value="1d20" placeholder="1d20+3">
+      <div style="font-size:11px;color:var(--text-secondary)">Формат: NdM±K — например, 2d6+1, 1d20-2</div>
+      <div style="display:flex;gap:8px">
+        <button class="btn" style="flex:1" id="modal-cancel">Отмена</button>
+        <button class="btn primary" style="flex:1" id="modal-ok">Бросить</button>
+      </div>`;
+    modalEl.classList.add('open');
+    const inp = document.getElementById('modal-input');
+    inp.focus(); inp.select();
+    const close = v => { modalEl.classList.remove('open'); res(v); };
+    modalContent.querySelectorAll('[data-preset]').forEach(b => {
+      b.onclick = () => {
+        inp.value = b.dataset.preset;
+        modalContent.querySelectorAll('[data-preset]').forEach(x => x.classList.remove('active'));
+        b.classList.add('active');
+        inp.focus();
+      };
+    });
+    document.getElementById('modal-cancel').onclick = () => close(null);
+    document.getElementById('modal-ok').onclick = () => close(inp.value.trim() || null);
+    inp.onkeydown = e => {
+      if (e.key === 'Enter') close(inp.value.trim() || null);
+      if (e.key === 'Escape') close(null);
+    };
+  });
+}
+
+function promptModal(title, ph) {
+  return new Promise(res => {
+    modalContent.innerHTML = `<h3>${title}</h3>
+      <input id="modal-input" type="text" value="${esc(ph)}">
+      <div style="display:flex;gap:8px">
+        <button class="btn" style="flex:1" id="modal-cancel">Отмена</button>
+        <button class="btn primary" style="flex:1" id="modal-ok">OK</button>
+      </div>`;
+    modalEl.classList.add('open');
+    const inp = document.getElementById('modal-input');
+    inp.focus(); inp.select();
+    const close = v => { modalEl.classList.remove('open'); res(v); };
+    document.getElementById('modal-cancel').onclick = () => close(null);
+    document.getElementById('modal-ok').onclick = () => close(inp.value.trim() || null);
+    inp.onkeydown = e => {
+      if (e.key === 'Enter') close(inp.value.trim() || null);
+      if (e.key === 'Escape') close(null);
+    };
+  });
+}
+function listModal(title, items) {
+  return new Promise(res => {
+    modalContent.innerHTML = `<h3>${title}</h3>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        ${items.map(i => `<div class="save-item" data-name="${esc(i)}">${esc(i)}</div>`).join('')}
+      </div>
+      <button class="btn" id="modal-cancel">Закрыть</button>`;
+    modalEl.classList.add('open');
+    const close = v => { modalEl.classList.remove('open'); res(v); };
+    modalContent.querySelectorAll('.save-item').forEach(el =>
+      el.onclick = () => close(el.dataset.name));
+    document.getElementById('modal-cancel').onclick = () => close(null);
+  });
+}
+function autosize() {
+  inputEl.style.height = 'auto';
+  inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
+}
+
+inputEl.addEventListener('input', autosize);
+inputEl.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage(inputEl.value);
+  }
+});
+sendBtn.onclick = () => sendMessage(inputEl.value);
+
+document.querySelectorAll('.quick-btn').forEach(btn => {
+  btn.onclick = () => {
+    if (busy) return;
+    const action = btn.dataset.quick;
+    if (action && action.startsWith('/')) {
+      const [c, ...r] = action.split(' ');
+      handleCommand(c.toLowerCase(), r.join(' '));
+    } else if (action) {
+      sendMessage(action);
+    }
+  };
+});
+
+const quickCustomRoll = document.getElementById('quick-custom-roll');
+if (quickCustomRoll) {
+  quickCustomRoll.onclick = () => {
+    if (busy) return;
+    rollModal().then(v => { if (v) doRoll(v); });
+  };
+}
+
+document.getElementById('menu-btn').onclick = () => {
+  drawerEl.classList.add('open');
+  drawerBg.classList.add('open');
+};
+drawerBg.onclick = () => {
+  drawerEl.classList.remove('open');
+  drawerBg.classList.remove('open');
+};
+document.querySelectorAll('#drawer .btn[data-action]').forEach(btn => {
+  btn.onclick = () => {
+    drawerEl.classList.remove('open');
+    drawerBg.classList.remove('open');
+    const a = btn.dataset.action;
+    if (a === 'dice') doRoll('1d20');
+    else if (a === 'dice-custom') rollModal().then(v => { if (v) doRoll(v); });
+    else if (a === 'sheet') doSheet();
+    else if (a === 'skills') doSkills();
+    else if (a === 'notes') doNotes();
+    else if (a === 'save') doSave();
+    else if (a === 'load') doLoad();
+    else if (a === 'reset') doReset();
+    else if (a === 'help') doHelp();
+  };
+});
+
+function init() {
+  const saved = restore();
+  if (saved && saved.messages.length) {
+    messages = saved.messages;
+    state = saved.state || {...EMPTY_STATE};
+    // Совместимость
+    if (!Array.isArray(state.relationships)) state.relationships = [];
+    if (!Array.isArray(state.faction_clocks)) state.faction_clocks = [];
+    if (!Array.isArray(state.dc_modifier_reasons)) state.dc_modifier_reasons = [];
+    if (!Array.isArray(state.proficiencies)) state.proficiencies = [];
+    if (!Array.isArray(state.skills)) state.skills = [];
+    if (!Array.isArray(state.abilities)) state.abilities = [];
+    if (!Array.isArray(state.level_history)) state.level_history = [];
+    if (!Array.isArray(state.xp_event_ids)) state.xp_event_ids = [];
+    if (typeof state.level_pending !== 'number') state.level_pending = 0;
+    if (!Array.isArray(state.notes)) state.notes = [];
+    if (typeof state.dc_modifier !== 'number') state.dc_modifier = 0;
+    if (typeof state.race !== 'string') state.race = '';
+    if (typeof state.class !== 'string') state.class = '';
+    if (typeof state.background !== 'string') state.background = '';
+    if (typeof state.position !== 'string') state.position = 'стоит';
+    if (typeof state.cover !== 'string') state.cover = 'нет';
+    if (typeof state.weapon_in_hand !== 'string') state.weapon_in_hand = '';
+    if (typeof state.restrained !== 'boolean') state.restrained = false;
+    if (Array.isArray(state.quests)) {
+      state.quests = state.quests.map(q => {
+        if (typeof q === 'string') {
+          return { id: 'legacy-' + Math.random().toString(36).slice(2,8), name: q,
+                   type: 'side', status: 'active', chain: '', chain_order: 0,
+                   stages: [], current_stage: 0, rewards: {}, giver: '', location: '' };
+        }
+        return q;
+      });
+    } else {
+      state.quests = [];
+    }
+    renderAll(); renderStatus();
+    addMsg('system', '↩ История восстановлена. Продолжайте.');
+  } else {
+    state = {...EMPTY_STATE};
+    renderStatus();
+    showIntro();
+  }
+  renderWorlds();
+  ttsLoad();
+  autosize();
+}
+init();
+</script>
+</body>
+</html>
