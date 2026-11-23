@@ -9,13 +9,10 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
-load_dotenv(Path(__file__).with_name(".env"))       # ← до импорта avatar
+load_dotenv(Path(__file__).with_name(".env"))
 
-from flask import Flask, request, jsonify, Response, render_template, send_from_directory
+from flask import Flask, request, jsonify, Response, render_template
 from openai import OpenAI
-
-import avatar
-from avatar import generate_avatar, rate_limit_ok, CACHE_DIR as AVATAR_CACHE_DIR
 
 app = Flask(__name__)
 
@@ -43,10 +40,6 @@ SAVES_DIR.mkdir(exist_ok=True)
 
 FREQ_PENALTY = float(os.getenv("OPENAI_FREQ_PENALTY", "0.35"))
 PRES_PENALTY = float(os.getenv("OPENAI_PRES_PENALTY", "0.25"))
-
-# X-Forwarded-For имеет смысл только за доверенным прокси. Иначе клиент
-# подставит свой заголовок и обойдёт лимит частоты.
-TRUST_PROXY = os.getenv("TRUST_PROXY", "0").strip().lower() in ("1", "true", "yes", "on")
 
 # ─── Лимит параллельных обращений к модели ─────────────────────────────────
 # Главное узкое место при нескольких игроках. Ставьте ровно столько, сколько
@@ -799,13 +792,8 @@ def api_health():
         "extract_model": EXTRACT_MODEL,
         "summary_model": SUMMARY_MODEL,
         "base_url_configured": bool(BASE_URL),
-        "trust_proxy": TRUST_PROXY,
         "llm_max_concurrent": LLM_MAX_CONCURRENT,
         "llm_queue_timeout": LLM_QUEUE_TIMEOUT,
-        "avatar_providers": avatar.PROVIDERS,
-        "avatar_max_concurrent": avatar.MAX_CONCURRENT,
-        "avatar_rate_limit": avatar.RATE_LIMIT,
-        "avatar_cache_dir": str(AVATAR_CACHE_DIR),
         "saves_dir": str(SAVES_DIR),
         "sessions_cached": len(_SUMMARY_STATE),
     })
@@ -823,42 +811,6 @@ def api_roll():
         return jsonify(roll_dice(data.get("expr", "")))
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
-
-
-@app.route("/api/avatar", methods=["POST"])
-def api_avatar():
-    data = request.get_json(silent=True) or {}
-    state = data.get("state")
-    if not isinstance(state, dict):
-        return jsonify({"ok": False, "errors": {"request": "state не передан"}}), 400
-
-    # X-Forwarded-For принимаем только за доверенным прокси — иначе лимит
-    # частоты обходится подстановкой заголовка. Берём последний элемент:
-    # его дописывает сам прокси, подделать его клиент не может.
-    if TRUST_PROXY:
-        xff = request.headers.get("X-Forwarded-For", "")
-        ip = xff.split(",")[-1].strip() if xff else (request.remote_addr or "?")
-    else:
-        ip = request.remote_addr or "?"
-
-    if not rate_limit_ok(ip):
-        return jsonify({"ok": False,
-                        "errors": {"rate": "слишком часто, попробуйте позже"}}), 429
-
-    force = bool(data.get("force"))
-    try:
-        return jsonify(generate_avatar(state, force=force))
-    except Exception as exc:
-        return jsonify({"ok": False, "errors": {"server": str(exc)[:200]}}), 500
-
-
-@app.route("/api/avatar/file/<path:name>")
-def api_avatar_file(name):
-    """Отдача готового портрета. Браузер кэширует его на год."""
-    safe = re.sub(r"[^a-zA-Z0-9_\-.]", "", name)
-    if safe != name or ".." in name:
-        return jsonify({"error": "bad name"}), 400
-    return send_from_directory(AVATAR_CACHE_DIR, safe, max_age=31536000)
 
 
 @app.route("/api/chat", methods=["POST"])
