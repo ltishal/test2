@@ -36,25 +36,15 @@
   }
   .status-row { display: flex; align-items: center; gap: 10px; }
   .status-top { display: flex; align-items: center; gap: 12px; }
-  .avatar-wrap {
-    width: 48px; height: 48px; border-radius: 50%; overflow: hidden;
-    border: 2px solid var(--accent-gold); background: var(--bg-card);
-    flex-shrink: 0; position: relative; cursor: pointer;
-    display: flex; align-items: center; justify-content: center;
-    transition: transform 0.2s;
+  .identity {
+    flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px;
+    padding-left: 12px; border-left: 3px solid var(--accent-gold);
   }
-  .avatar-wrap:active { transform: scale(0.95); }
-  .avatar-wrap img { width: 100%; height: 100%; object-fit: cover; display: block; }
-  .avatar-placeholder { color: var(--accent-gold); font-size: 20px; font-family: var(--font-serif); font-weight: bold; }
-  .avatar-wrap.loading::after {
-    content: ''; position: absolute; inset: 0;
-    border: 2px solid transparent; border-top-color: var(--accent-gold);
-    border-radius: 50%; animation: spin 0.8s linear infinite;
+  .identity-name {
+    font-weight: 700; color: var(--accent-gold); font-family: var(--font-serif);
+    font-size: 19px; line-height: 1.2; word-break: break-word;
   }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  .status-info { flex: 1; display: flex; flex-direction: column; gap: 4px; }
-  .status-name { font-weight: 700; color: var(--accent-gold); font-family: var(--font-serif); font-size: 15px; }
-  .status-sub { font-size: 11px; color: var(--text-secondary); margin-top: -2px; }
+  .identity-sub { font-size: 12px; color: var(--text-secondary); }
   .status-chips { display: flex; gap: 6px; flex-wrap: wrap; }
   .status-chip {
     background: var(--bg-card); padding: 2px 8px; border-radius: 6px;
@@ -208,7 +198,6 @@
   .stat-box .lbl { font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; }
   .stat-box .val { font-size: 18px; font-weight: 700; color: var(--accent-gold); margin-top: 4px; font-family: var(--font-serif); }
   .stat-box .mod { font-size: 11px; color: var(--text-secondary); margin-top: 2px; font-family: monospace; }
-  .avatar-large { display: block; margin: 0 auto; width: 220px; height: 220px; border-radius: 50%; border: 3px solid var(--accent-gold); object-fit: cover; background: var(--bg-deep); }
   .dc-box { background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 8px; padding: 10px; margin-top: 8px; }
   .dc-box.up { border-color: #5a3a2a; }
   .dc-box.down { border-color: #2a4a2a; }
@@ -379,7 +368,6 @@ const modalContent = document.getElementById('modal-content');
 const statusEl = document.getElementById('status');
 
 const LS_KEY = 'rpg_session_v9';
-const AVATAR_KEY = 'rpg_avatar_v1';
 const TTS_KEY = 'rpg_tts_v1';
 
 /* ═══════════ ИДЕНТИФИКАТОРЫ ═══════════
@@ -487,171 +475,6 @@ const COVER_LABELS = {
 };
 function getPositionInfo(pos) { return POSITION_LABELS[pos] || { icon: '❔', label: pos || '—', mod: 0 }; }
 function getCoverInfo(cov) { return COVER_LABELS[cov] || { icon: '', label: cov || '—', mod: 0 }; }
-
-/* ═══════════ AVATAR — серверная цепочка провайдеров + офлайн-сигил ═══════════ */
-
-let avatarBusy = false;
-let avatarRetryAt = 0;          // до этого времени повторно не дёргаем провайдера
-
-const isFallbackAvatar = c => !!c && (c.provider === 'sigil' || c.provider === 'static');
-
-function cachedAvatarFor(name) {
-  try {
-    const data = JSON.parse(localStorage.getItem(AVATAR_KEY) || 'null');
-    if (data && data.name === name && data.url) return data;
-  } catch (e) {}
-  return null;
-}
-function saveAvatar(name, url, provider) {
-  try {
-    localStorage.setItem(AVATAR_KEY, JSON.stringify({name, url, provider, ts: Date.now()}));
-  } catch (e) {
-    // квота: пробуем сбросить старую запись
-    try { localStorage.removeItem(AVATAR_KEY); } catch (e2) {}
-  }
-}
-
-/* Детерминированный гербовый сигил: работает без сети, всегда одинаковый */
-function sigilAvatar(name) {
-  let h = 2166136261 >>> 0;
-  for (const ch of String(name || '?')) {
-    h ^= ch.codePointAt(0); h = Math.imul(h, 16777619) >>> 0;
-  }
-  const next = (n) => { h ^= h << 13; h >>>= 0; h ^= h >>> 17; h ^= h << 5; h >>>= 0; return h % n; };
-  const hue = next(360), hue2 = (hue + 140 + next(80)) % 360;
-  const S = 256, c = S / 2;
-  let strokes = '';
-  for (let i = 0; i < 8; i++) {
-    const a = (i / 8) * Math.PI * 2;
-    const r1 = 34 + next(26), r2 = 78 + next(34), w = 2 + next(3);
-    const x1 = c + Math.cos(a) * r1, y1 = c + Math.sin(a) * r1;
-    const x2 = c + Math.cos(a) * r2, y2 = c + Math.sin(a) * r2;
-    strokes += `<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" stroke-width="${w}"/>`;
-    if (next(2)) {
-      const b = a + 0.42, r3 = r1 + next(30);
-      strokes += `<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${(c + Math.cos(b) * r3).toFixed(1)}" y2="${(c + Math.sin(b) * r3).toFixed(1)}" stroke-width="${Math.max(1, w - 1)}"/>`;
-    }
-  }
-  let runes = '';
-  for (let i = 0; i < 5; i++) {
-    const y = 96 + i * 16, w = 8 + next(10);
-    runes += `<line x1="${c - w}" y1="${y}" x2="${c + w}" y2="${y + (next(3) - 1) * 6}"/>`;
-  }
-  const svg =
-    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${S} ${S}" width="${S}" height="${S}">` +
-    `<defs><radialGradient id="g" cx="50%" cy="38%">` +
-    `<stop offset="0" stop-color="hsl(${hue2},42%,26%)"/>` +
-    `<stop offset="1" stop-color="hsl(${hue},35%,9%)"/></radialGradient></defs>` +
-    `<rect width="${S}" height="${S}" fill="url(#g)"/>` +
-    `<circle cx="${c}" cy="${c}" r="112" fill="none" stroke="hsl(${hue},55%,58%)" stroke-width="2" opacity="0.65"/>` +
-    `<circle cx="${c}" cy="${c}" r="98" fill="none" stroke="hsl(${hue},55%,58%)" stroke-width="1" opacity="0.3"/>` +
-    `<g stroke="hsl(${hue},62%,70%)" stroke-linecap="round" opacity="0.9">${strokes}</g>` +
-    `<g stroke="hsl(${hue2},60%,72%)" stroke-linecap="round" stroke-width="2" opacity="0.85">${runes}</g>` +
-    `</svg>`;
-  return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
-}
-
-function paintAvatar(url, name) {
-  const wrap = document.querySelector('.avatar-wrap');
-  if (!wrap) return;
-  wrap.classList.remove('loading');
-  wrap.innerHTML = `<img src="${url}" alt="${esc(name)}">`;
-}
-
-async function generateAvatar(force) {
-  if (!state || !state.name || state.name === 'Пустой') return;
-  const wrap = document.querySelector('.avatar-wrap');
-  if (!wrap) return;
-
-  const cached = cachedAvatarFor(state.name);
-  if (!force) {
-    // Настоящий портрет — показываем и выходим.
-    if (cached && !isFallbackAvatar(cached)) { paintAvatar(cached.url, state.name); return; }
-    // Фолбэк — показываем как заглушку и пробуем получить настоящий.
-    if (cached) paintAvatar(cached.url, state.name);
-    if (Date.now() < avatarRetryAt) return;
-  }
-  if (avatarBusy) return;
-  avatarBusy = true;
-
-  wrap.classList.add('loading');
-  if (force) wrap.innerHTML = '<div class="avatar-placeholder">?</div>';
-
-  const fallback = sigilAvatar(state.name);
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 90000);
-  try {
-    const res = await fetch('/api/avatar', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({state, force: !!force}),
-      signal: ctrl.signal
-    });
-    if (res.status === 429) throw new Error('слишком часто — попробуйте позже');
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const d = await res.json();
-    const url = d.url || d.data_url;
-    if (!d.ok || !url) {
-      const why = Object.entries(d.errors || {})
-        .map(([k, v]) => `${k}: ${v}`).join(' | ') || 'нет доступного провайдера';
-      throw new Error(why);
-    }
-    paintAvatar(url, state.name);
-    saveAvatar(state.name, url, d.provider);
-    if (d.provider === 'static') {
-      // Сервер отдал фолбэк: запомним, но повторим попытку через 5 минут.
-      avatarRetryAt = Date.now() + 5 * 60 * 1000;
-      if (force) addMsg('system', '🖼 Настоящий портрет не получен — показан запасной. ' +
-        'Проверьте /api/health и переменные Pollinations.');
-    } else {
-      avatarRetryAt = 0;
-      if (force) addMsg('system', `🖼 Портрет обновлён (${d.provider}).`);
-    }
-  } catch (e) {
-    const aborted = e && e.name === 'AbortError';
-    console.warn('[avatar]', aborted ? 'таймаут ожидания' : e.message);
-    paintAvatar(fallback, state.name);
-    saveAvatar(state.name, fallback, 'sigil');
-    avatarRetryAt = Date.now() + 5 * 60 * 1000;
-    if (force) addMsg('system', 'Не удалось сгенерировать портрет: ' +
-      (aborted ? 'таймаут ожидания' : e.message) + '\nПоказан офлайн-сигил.');
-  } finally {
-    clearTimeout(timer);
-    avatarBusy = false;
-  }
-}
-
-function maybeGenerateAvatar() {
-  if (!state || !state.name || state.name === 'Пустой') return;
-  if (!document.querySelector('.avatar-wrap')) return;
-  generateAvatar(false);
-}
-
-function openAvatarModal() {
-  if (!state || !state.name || state.name === 'Пустой') {
-    addMsg('system', 'Имя персонажа ещё не определено. Сыграйте пару ходов.');
-    return;
-  }
-  const cached = cachedAvatarFor(state.name);
-  const imgSrc = cached ? cached.url : '';
-  const providerLine = cached && cached.provider
-    ? `<div style="text-align:center;font-size:11px;color:var(--text-secondary)">источник: ${esc(cached.provider)}</div>`
-    : '';
-  modalContent.innerHTML = `
-    <h3>🖼 Портрет: ${esc(state.name)}</h3>
-    ${imgSrc ? `<img class="avatar-large" src="${imgSrc}" alt="${esc(state.name)}">` : `<div style="text-align:center;padding:20px;color:var(--text-secondary)">Портрет ещё не сгенерирован</div>`}
-    ${providerLine}
-    <button class="btn primary" id="regen-avatar">⟳ Сгенерировать заново</button>
-    <button class="btn" onclick="document.getElementById('modal').classList.remove('open')">Закрыть</button>
-  `;
-  modalEl.classList.add('open');
-  document.getElementById('regen-avatar').onclick = () => {
-    localStorage.removeItem(AVATAR_KEY);
-    avatarRetryAt = 0;
-    modalEl.classList.remove('open');
-    generateAvatar(true);
-  };
-}
 
 /* ═══════════ TTS ═══════════ */
 const tts = {
@@ -840,24 +663,22 @@ function renderStatus() {
     ? `<span class="status-chip cover">${covInfo.icon} ${esc(covInfo.label)}</span>` : '';
   const restrChip = state.restrained
     ? `<span class="status-chip dc-up">⛓ Связан</span>` : '';
+
   statusEl.innerHTML = `
     <div class="status-top">
-      <div class="avatar-wrap" title="Нажмите, чтобы увидеть портрет">
-        <div class="avatar-placeholder">?</div>
+      <div class="identity">
+        <div class="identity-name">${esc(state.name || 'Пустой')}</div>
+        <div class="identity-sub">${esc(raceClass || 'раса и класс пока не определены')}</div>
       </div>
-      <div class="status-info">
-        <div class="status-name">${esc(state.name || 'Пустой')}</div>
-        ${raceClass ? `<div class="status-sub">${esc(raceClass)}</div>` : ''}
-        <div class="status-chips">
-          <span class="status-chip">Ур. ${state.level}</span>
-          ${state.level_pending ? `<span class="status-chip" title="Обсуди повышение с мастером">⬆ Повышение!</span>` : ''}
-          <span class="status-chip">💰 ${state.gold}</span>
-          ${posChip}
-          ${covChip}
-          ${restrChip}
-          ${dcChip}
-        </div>
-      </div>
+    </div>
+    <div class="status-chips">
+      <span class="status-chip">Ур. ${state.level}</span>
+      ${state.level_pending ? `<span class="status-chip" title="Обсуди повышение с мастером">⬆ Повышение!</span>` : ''}
+      <span class="status-chip">💰 ${state.gold}</span>
+      ${posChip}
+      ${covChip}
+      ${restrChip}
+      ${dcChip}
     </div>
     <div class="status-row"><span style="color:#d45a5a;font-size:11px;width:20px">HP</span>
       <div class="bar-wrap"><div class="bar-fill bar-hp" style="width:${hpPct}%"></div></div>
@@ -866,9 +687,7 @@ function renderStatus() {
       <div class="bar-wrap"><div class="bar-fill bar-xp" style="width:${xpPct}%"></div></div>
       <span class="bar-label">${state.xp}/${state.xp_next}</span></div>
     ${c ? `<div class="status-row" style="font-size:12px;color:var(--text-secondary)">${c}</div>` : ''}`;
-  const wrap = statusEl.querySelector('.avatar-wrap');
-  if (wrap) wrap.onclick = openAvatarModal;
-  maybeGenerateAvatar();
+
   updateNotesBadge();
 }
 
@@ -1135,16 +954,11 @@ async function doSheet() {
     const m = Math.floor((val - 10) / 2);
     return m >= 0 ? '+' + m : '' + m;
   };
-  const cached = cachedAvatarFor(state.name);
-  const avatar = cached
-    ? `<img class="avatar-large" src="${cached.url}" alt="${esc(state.name)}" style="width:140px;height:140px">`
-    : '';
 
   const notesCount = (state.notes || []).length;
   const notesUnread = (state.notes || []).filter(n => n.unread).length;
 
   modalContent.innerHTML = `
-    ${avatar}
     <h3>📜 ${esc(state.name || 'Пустой')}</h3>
     ${state.race || state.class ? `<div class="kv"><span class="k">Раса · Класс</span><span class="v">${esc(state.race || '—')} · ${esc(state.class || '—')}</span></div>` : ''}
     ${state.background ? `<div class="kv"><span class="k">Предыстория</span><span class="v">${esc(state.background)}</span></div>` : ''}
@@ -1485,7 +1299,6 @@ async function doLoad(name) {
 function doReset() {
   if (!confirm('Начать новую игру? Текущая история будет потеряна.')) return;
   messages = []; state = {...EMPTY_STATE};
-  try { localStorage.removeItem(AVATAR_KEY); } catch(e){}
   resetSession();
   ttsStop();
   persist(); chatEl.innerHTML = ''; renderStatus(); showIntro();
@@ -1499,7 +1312,6 @@ function doHelp() {
     '<code>/reset</code> — новая игра<br><br>' +
     'Заметки, письма, документы, слухи — в отдельной вкладке 📝, не в инвентаре.<br>' +
     'XP начисляется за убийства, победы без убийства и завершённые квесты.<br>' +
-    'Портрет генерируется на сервере (цепочка провайдеров); клик по аватару — посмотреть и перегенерировать.<br>' +
     'В окне загрузки можно переименовать (✎) и удалить (🗑) сохранение; рядом видно время записи.');
 }
 
@@ -1535,7 +1347,6 @@ function renderWorlds() {
       drawerEl.classList.remove('open');
       drawerBg.classList.remove('open');
       messages = []; state = {...EMPTY_STATE};
-      try { localStorage.removeItem(AVATAR_KEY); } catch(e){}
       resetSession();
       ttsStop();
       chatEl.innerHTML = '';
@@ -1665,6 +1476,9 @@ document.querySelectorAll('#drawer .btn[data-action]').forEach(btn => {
 });
 
 function init() {
+  // Чистим следы прежней версии с аватарами.
+  try { localStorage.removeItem('rpg_avatar_v1'); } catch(e){}
+
   const saved = restore();
   if (saved && saved.messages.length) {
     messages = saved.messages;
