@@ -7,8 +7,11 @@
   • семафор       — не более AVATAR_MAX_CONCURRENT обращений к провайдерам разом
   • лимит частоты — на IP, чтобы «перегенерировать» не превращалось в спам
 
-Порядок задаётся AVATAR_PROVIDERS (по умолчанию: pollinations,static).
-Доступные: local, hf, horde, pollinations, perchance, bing, static.
+Порядок задаётся AVATAR_PROVIDERS (по умолчанию: cloudflare,pollinations,static).
+Доступные: local, hf, horde, pollinations, perchance, bing, cloudflare, static.
+
+Промпт всегда английский: кириллицу модели генерации не знают и пытаются
+нарисовать её буквами. Имя персонажа остаётся только в seed.
 """
 import base64
 import hashlib
@@ -31,7 +34,7 @@ TIMEOUT = float(os.getenv("AVATAR_TIMEOUT", "60"))
 HORDE_TIMEOUT = float(os.getenv("AVATAR_HORDE_TIMEOUT", "240"))
 
 PROVIDERS = [p.strip() for p in os.getenv(
-    "AVATAR_PROVIDERS", "pollinations,static"
+    "AVATAR_PROVIDERS", "cloudflare,pollinations,static"
 ).split(",") if p.strip()]
 
 # Относительный путь считается от папки проекта, а не от текущего каталога —
@@ -45,49 +48,48 @@ RATE_LIMIT = max(0, int(os.getenv("AVATAR_RATE_LIMIT", "20")))
 RATE_WINDOW = float(os.getenv("AVATAR_RATE_WINDOW", "3600"))
 MEM_CACHE_MAX = int(os.getenv("AVATAR_MEM_CACHE", "64"))
 
-STYLE = ("fantasy RPG character portrait, head and shoulders, centered composition, "
-         "detailed digital painting, dramatic rim lighting, dark atmospheric background, "
-         "painterly, highly detailed")
+STYLE = ("detailed digital painting, painterly style, muted colours, "
+         "dramatic rim lighting, dark atmospheric background")
 NEGATIVE = ("text, watermark, signature, logo, frame, border, ui, multiple people, "
             "deformed hands, extra limbs, low quality, jpeg artifacts, blurry")
 
 RACE_HINTS = {
     "человек": "human",
-    "эльф": "elf, pointed ears, slender features",
-    "полуэльф": "half-elf, subtly pointed ears",
-    "дворф": "dwarf, stocky, braided beard",
-    "полурослик": "halfling, small and nimble, curly hair",
-    "гном": "gnome, wild hair, goggles",
-    "полуорк": "half-orc, small tusks, heavy brow",
-    "тифлинг": "tiefling, curved horns, long tail",
-    "драконорождённый": "dragonborn, scaled hide, blunt snout",
-    "гоблин": "goblin, wide grin, large ears",
-    "кобольд": "kobold, small reptilian, snout and tail",
-    "орк": "orc, tusks, war paint",
+    "эльф": "elf with pointed ears and slender features",
+    "полуэльф": "half-elf with subtly pointed ears",
+    "дворф": "dwarf, stocky, with a braided beard",
+    "полурослик": "halfling, small and nimble, with curly hair",
+    "гном": "gnome with wild hair and goggles",
+    "полуорк": "half-orc with small tusks and a heavy brow",
+    "тифлинг": "tiefling with curved horns and a long tail",
+    "драконорождённый": "dragonborn with a scaled hide and blunt snout",
+    "гоблин": "goblin with a wide grin and large ears",
+    "кобольд": "kobold, small and reptilian, with a snout and tail",
+    "орк": "orc with tusks and war paint",
 }
 
 CLASS_HINTS = {
-    "воин": "battle-worn knight in battered plate armour",
-    "варвар": "barbarian, fur and hide, tribal tattoos",
-    "паладин": "paladin in polished armour with a holy symbol",
-    "плут": "rogue in a hood, daggers at the belt",
-    "следопыт": "ranger in a weather-beaten cloak, bow over the shoulder",
-    "монах": "monk in simple robes, wrapped hands",
-    "маг": "mage in layered robes, arcane focus glowing",
-    "жрец": "cleric in chainmail with a temple sigil",
-    "друид": "druid in mossy robes, antler charm",
-    "бард": "bard with a lute and a flamboyant hat",
-    "колдун": "warlock with a pact mark and a dark gaze",
-    "чародей": "sorcerer with faint arcane light in the palms",
+    "воин": "a battle-worn knight in battered plate armour",
+    "варвар": "a barbarian in fur and hide, with tribal tattoos",
+    "паладин": "a paladin in polished armour bearing a holy symbol",
+    "плут": "a rogue in a hood, daggers at the belt",
+    "следопыт": "a ranger in a weather-beaten cloak, a bow over the shoulder",
+    "монах": "a monk in simple robes with wrapped hands",
+    "маг": "a mage in layered robes, an arcane focus glowing",
+    "жрец": "a cleric in chainmail with a temple sigil",
+    "друид": "a druid in mossy robes with an antler charm",
+    "бард": "a bard with a lute and a flamboyant hat",
+    "колдун": "a warlock with a pact mark and a dark gaze",
+    "чародей": "a sorcerer with faint arcane light in the palms",
 }
 
 CONDITION_HINTS = {
-    "ранен": "bloodied, torn clothes, fresh cuts",
-    "изранен": "heavily wounded, bandages",
-    "отравлен": "sallow skin, dark veins at the temples",
-    "испуган": "wide eyes, tense jaw",
-    "проклят": "faint unnatural glow in the eyes",
-    "устал": "exhausted, shadows under the eyes",
+    "ранен": "bloodied, with torn clothes and fresh cuts",
+    "изранен": "heavily wounded, wrapped in bandages",
+    "отравлен": "sallow-skinned, with dark veins at the temples",
+    "испуган": "wide-eyed and tense",
+    "проклят": "with a faint unnatural glow in the eyes",
+    "устал": "exhausted, with shadows under the eyes",
 }
 
 
@@ -103,34 +105,55 @@ def _identity(state):
 
 
 def _seed(state):
-    """Детерминированный seed: один персонаж → один и тот же портрет."""
+    """Детерминированный seed: один персонаж → один и тот же портрет.
+
+    Имя входит именно сюда, а не в текст промпта.
+    """
     digest = hashlib.sha256(_identity(state).encode("utf-8")).hexdigest()
     return int(digest[:8], 16)
 
 
 def _archetype(state):
+    """Английское описание облика по классу, либо по главной характеристике."""
     cls = (state.get("class") or "").lower()
     for key, val in CLASS_HINTS.items():
         if key in cls:
             return val
     stats = state.get("stats") or {}
-    table = [("str", "battle-worn warrior"), ("dex", "lithe rogue in a hood"),
-             ("int", "scholar-mage with an arcane focus"), ("wis", "temple cleric"),
-             ("cha", "charismatic bard in fine clothes")]
+    table = [("str", "a battle-worn warrior"),
+             ("dex", "a lithe rogue in a hood"),
+             ("int", "a scholar-mage with an arcane focus"),
+             ("wis", "a temple cleric"),
+             ("cha", "a charismatic bard in fine clothes")]
     return max(table, key=lambda kv: stats.get(kv[0], 10))[1]
 
 
 def build_prompt(state):
-    name = _clean(state.get("name"), 60) or "adventurer"
-    race_raw = _clean(state.get("race"), 40)
-    race = RACE_HINTS.get(race_raw.lower(), race_raw)
-    parts = [f"portrait of {name}", race, _archetype(state)]
-    for cond in (state.get("conditions") or [])[:3]:
+    """Промпт для FLUX: связная фраза на английском, без кириллицы.
+
+    Кириллицу модели генерации не знают — они либо игнорируют её, либо
+    пытаются нарисовать буквами. Поэтому имя в текст не попадает.
+    Список тегов через запятую тоже не подходит: FLUX обучен на связных
+    описаниях и на рубленый список реагирует хуже, чем SDXL.
+    """
+    race_raw = _clean(state.get("race"), 40).lower()
+    race = RACE_HINTS.get(race_raw, "")
+    cls = _archetype(state)
+
+    subject_parts = [p for p in (race, cls) if p]
+    for cond in (state.get("conditions") or [])[:2]:
         hint = CONDITION_HINTS.get(_clean(cond, 40).lower())
         if hint:
-            parts.append(hint)
-    parts.append(STYLE)
-    return ", ".join(p for p in parts if p)[:900]
+            subject_parts.append(hint)
+    subject = ", ".join(subject_parts) or "a wandering adventurer"
+
+    return (
+        f"A fantasy RPG character portrait of {subject}. "
+        f"Head and shoulders, centered composition, looking at the viewer. "
+        f"Dark atmospheric background, dramatic rim lighting from one side. "
+        f"Detailed digital painting, painterly style, muted colours. "
+        f"Single character, no text."
+    )[:900]
 
 
 # ─── Утилиты ───────────────────────────────────────────────────────────────
@@ -139,6 +162,21 @@ def _b64_to_bytes(raw):
     if raw.startswith("data:"):
         raw = raw.split(",", 1)[-1]
     return base64.b64decode(raw)
+
+
+def _sniff_mime(data):
+    """Определяет тип картинки по сигнатуре файла."""
+    if not data:
+        return "image/jpeg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data[:5] == b"<?xml" or data[:4] == b"<svg":
+        return "image/svg+xml"
+    return "image/jpeg"
 
 
 def _mime_to_ext(mime):
@@ -153,6 +191,57 @@ def _mime_to_ext(mime):
 
 
 # ─── Провайдеры ────────────────────────────────────────────────────────────
+def gen_cloudflare(prompt, seed, size):
+    """Cloudflare Workers AI — FLUX.1-schnell.
+
+    Бесплатный тариф: ~10 000 нейронов в сутки, одна картинка 512×512
+    стоит порядка 20–25 нейронов, то есть 300–500 портретов в день.
+
+    Нужны CF_ACCOUNT_ID (Account ID со страницы Workers AI) и CF_API_TOKEN
+    (токен с шаблоном «Workers AI»).
+    """
+    account = (os.getenv("CF_ACCOUNT_ID") or "").strip()
+    token = (os.getenv("CF_API_TOKEN") or "").strip()
+    if not account or not token:
+        raise RuntimeError("CF_ACCOUNT_ID / CF_API_TOKEN не заданы")
+
+    model = os.getenv("CF_IMAGE_MODEL", "@cf/black-forest-labs/flux-1-schnell")
+    url = f"https://api.cloudflare.com/client/v4/accounts/{account}/ai/run/{model}"
+
+    r = requests.post(
+        url,
+        headers={"Authorization": f"Bearer {token}",
+                 "Content-Type": "application/json"},
+        json={"prompt": prompt, "steps": 4, "seed": seed},
+        timeout=TIMEOUT)
+
+    if r.status_code == 401:
+        raise RuntimeError("Cloudflare: неверный CF_API_TOKEN")
+    if r.status_code == 403:
+        raise RuntimeError("Cloudflare: токену не выдан доступ к Workers AI")
+    if r.status_code == 429:
+        raise RuntimeError("Cloudflare: суточная квота исчерпана")
+
+    mime = r.headers.get("Content-Type", "")
+    if r.status_code == 200 and mime.startswith("image/"):
+        return r.content, mime            # сырая картинка
+
+    # Иначе JSON вида {"result": {"image": "<base64>"}, "success": true}
+    try:
+        data = r.json()
+    except ValueError:
+        raise RuntimeError(f"Cloudflare {r.status_code}: {r.text[:180]}")
+
+    if not data.get("success"):
+        raise RuntimeError(f"Cloudflare: {str(data.get('errors'))[:180]}")
+
+    b64 = (data.get("result") or {}).get("image")
+    if not b64:
+        raise RuntimeError("Cloudflare: в ответе нет изображения")
+    raw = _b64_to_bytes(b64)
+    return raw, _sniff_mime(raw)
+
+
 def gen_local(prompt, seed, size):
     """Локальный Stable Diffusion: A1111 / Forge / SD.Next, иначе Fooocus-API."""
     base = (os.getenv("AVATAR_LOCAL_URL") or "").rstrip("/")
@@ -276,19 +365,50 @@ def gen_horde(prompt, seed, size):
 
 
 def gen_pollinations(prompt, seed, size):
-    """Pollinations — без ключа. Без enhance: он портит промпт."""
-    model = os.getenv("POLLINATIONS_MODEL", "flux")
-    url = ("https://image.pollinations.ai/prompt/"
-           + urllib.parse.quote(prompt, safe="")
-           + f"?width={size}&height={size}&seed={seed}&model={model}"
-             "&nologo=true&private=true&safe=false&referrer=rpg-ai-master")
-    r = requests.get(url, timeout=min(TIMEOUT, 60),
-                     headers={"User-Agent": "rpg-ai-master/1.0"})
-    r.raise_for_status()
-    mime = r.headers.get("Content-Type", "")
-    if not mime.startswith("image/"):
-        raise RuntimeError(f"Pollinations: {r.text[:180]}")
-    return r.content, mime
+    """Pollinations. Без private/safe — на анонимном уровне они ломают запрос.
+
+    Модели перебираются по списку POLLINATIONS_MODEL (например, flux,turbo):
+    если первая недоступна для текущего уровня доступа, берётся следующая.
+    """
+    token = (os.getenv("POLLINATIONS_TOKEN") or "").strip()
+    models = [m.strip() for m in
+              os.getenv("POLLINATIONS_MODEL", "flux,turbo").split(",") if m.strip()]
+
+    last_error = None
+    for model in models:
+        params = {
+            "width": size,
+            "height": size,
+            "seed": seed,
+            "model": model,
+            "nologo": "true",
+        }
+        if token:
+            params["token"] = token
+
+        url = ("https://image.pollinations.ai/prompt/"
+               + urllib.parse.quote(prompt, safe="")
+               + "?" + urllib.parse.urlencode(params))
+        try:
+            r = requests.get(
+                url,
+                timeout=min(TIMEOUT, 60),
+                headers={"User-Agent": "rpg-ai-master/1.0",
+                         "Referer": "https://github.com/"},
+            )
+            if r.status_code == 402:
+                raise RuntimeError("402 — нужен POLLINATIONS_TOKEN")
+            if r.status_code == 429:
+                raise RuntimeError("429 — лимит запросов, попробуйте позже")
+            r.raise_for_status()
+            mime = r.headers.get("Content-Type", "")
+            if not mime.startswith("image/"):
+                raise RuntimeError(f"{r.status_code}: {r.text[:180]}")
+            return r.content, mime
+        except Exception as exc:
+            last_error = exc
+
+    raise last_error or RuntimeError("Pollinations недоступен")
 
 
 def gen_perchance(prompt, seed, size):
@@ -363,17 +483,36 @@ def gen_bing(prompt, seed, size):
             browser.close()
 
 
-def gen_static(state, size):
-    """Мгновенный детерминированный SVG (DiceBear). Возвращает URL, не байты."""
-    seed = urllib.parse.quote(_identity(state) or "adventurer")
-    style = os.getenv("AVATAR_STATIC_STYLE", "adventurer")
+def gen_static(state, size, extra_seed=None):
+    """Запасной аватар DiceBear.
+
+    extra_seed задаётся при перегенерации, чтобы «Сгенерировать заново»
+    действительно меняло картинку — иначе seed берётся от имени и всегда
+    даёт одно и то же лицо.
+    """
+    base = _identity(state) or "adventurer"
+    if extra_seed is not None:
+        base = f"{base}|{extra_seed}"
+    style = os.getenv("AVATAR_STATIC_STYLE", "lorelei")
+
     url = (f"https://api.dicebear.com/9.x/{style}/svg"
-           f"?seed={seed}&size={size}&backgroundType=gradientLinear"
+           f"?seed={urllib.parse.quote(base)}"
+           f"&size={size}"
+           f"&backgroundType=gradientLinear"
            f"&backgroundColor=24201d,1a1614,2a2420")
+
+    # У adventurer очки и хмурый рот включены по умолчанию — гасим.
+    # DiceBear игнорирует неизвестные параметры, так что вреда не будет.
+    if style == "adventurer":
+        url += ("&glassesProbability=0"
+                "&earringsProbability=0"
+                "&featuresProbability=0")
+
     return url, "image/svg+xml"
 
 
 PROVIDER_FUNCS = {
+    "cloudflare": gen_cloudflare,
     "local": gen_local,
     "hf": gen_hf,
     "horde": gen_horde,
@@ -423,6 +562,10 @@ def _disk_read(state):
         meta = json.loads((CACHE_DIR / f"{key}.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+    # Фолбэк не считается кэшем: иначе DiceBear залипнет навсегда,
+    # и настоящий портрет уже никогда не запросится.
+    if meta.get("provider") == "static":
+        return None
     ext = meta.get("ext")
     if ext:
         if not (CACHE_DIR / f"{key}.{ext}").exists():
@@ -454,16 +597,6 @@ def _disk_write(state, data, mime, seed, provider, prompt):
                   json.dumps({"provider": provider, "mime": mime, "ext": ext,
                               "seed": seed, "prompt": prompt}, ensure_ascii=False))
     return f"/api/avatar/file/{key}.{ext}"
-
-
-def _disk_write_url(state, url, provider, seed, prompt):
-    """Для static: картинку не качаем, храним только ссылку."""
-    key = _cache_key(state)
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    _atomic_write(CACHE_DIR / f"{key}.json",
-                  json.dumps({"provider": provider, "url": url,
-                              "seed": seed, "prompt": prompt}, ensure_ascii=False))
-    return url
 
 
 def _remember(key, result):
@@ -509,8 +642,10 @@ def _render(state, key, force):
     for name in PROVIDERS:
         try:
             if name == "static":
-                url, _ = gen_static(state, SIZE)
-                url = _disk_write_url(state, url, "static", seed, prompt)
+                url, _ = gen_static(state, SIZE,
+                                    extra_seed=(seed if force else None))
+                # На диск не пишем: фолбэк должен пересматриваться при
+                # следующем запросе, а не закрепляться навсегда.
                 result = {"ok": True, "provider": "static", "url": url,
                           "seed": seed, "prompt": prompt}
             else:
