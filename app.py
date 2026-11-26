@@ -38,13 +38,14 @@ from engine.turn_protocol import DeltaStream, PROTOCOL_PROMPT, validate_delta
 from engine.world import (WORLD_PROMPT, world_context, merge_entities, npc_damage,
                           bind_damage_target, apply_npc_damage)
 
-from engine.effects import EFFECT_PROMPT, resolve_effects, effect_context, check_bonus, STATS
+from engine.effects import (EFFECT_PROMPT, PASSIVE_OBSERVATION, resolve_effects, effect_context, check_bonus,
+                            control_restriction, hero_incapacitated, STATS)
 
 from party_store import PartyConflict, PartyMissing, PartyStore
 from token_usage import TokenUsage, state_turn_id
 
 BASE_DIR = Path(__file__).resolve().parent
-APP_REVISION = "2026-11-27.world-alpha2"
+APP_REVISION = "2026-11-27.world-alpha2.1"
 QWEN_SUMMARY_LIMIT = 480
 QWEN_STATE_LIMIT = 1100
 QWEN_STATE_SETUP_LIMIT = 2200
@@ -122,14 +123,15 @@ SUMMARY_MODEL = _model_id((os.getenv("SUMMARY_MODEL") or "").strip() or MODEL)
 # presence_penalty снят: он подталкивал модель к раннему завершению ответа.
 FREQ_PENALTY = float(os.getenv("OPENAI_FREQ_PENALTY", "0.15"))
 PRES_PENALTY = float(os.getenv("OPENAI_PRES_PENALTY", "0.0"))
-NARRATION_MAX_TOKENS = max(256, int(os.getenv("NARRATION_MAX_TOKENS", "900")))
+NARRATION_MAX_TOKENS = max(256, int(os.getenv("NARRATION_MAX_TOKENS", "2300")))
 INLINE_STATE_ENABLED = os.getenv("INLINE_STATE_ENABLED", "1").strip().lower() in {"1", "true", "yes"}
 INLINE_STATE_EXTRA_TOKENS = max(256, int(os.getenv("INLINE_STATE_EXTRA_TOKENS", "700")))
 # Создание героя длиннее: блок листа плюс открывающая сцена. 2200, потому что
 # обрыв на середине листа стоит целого хода.
-NARRATION_SETUP_TOKENS = max(NARRATION_MAX_TOKENS, int(os.getenv("NARRATION_SETUP_TOKENS", "2200")))
+NARRATION_SETUP_TOKENS = max(256, int(os.getenv("NARRATION_SETUP_TOKENS", "2200")))
 # Повтор при пустом или оборванном ответе: лимит выше, рассуждения выключены.
-NARRATION_RETRY_TOKENS = max(NARRATION_SETUP_TOKENS, int(os.getenv("NARRATION_RETRY_TOKENS", "2600")))
+NARRATION_RETRY_TOKENS = max(NARRATION_SETUP_TOKENS, NARRATION_MAX_TOKENS,
+                             int(os.getenv("NARRATION_RETRY_TOKENS", "2600")))
 NARRATION_RETRY_EFFORT = (os.getenv("NARRATION_RETRY_EFFORT") or "none").strip()
 # Необязательно: "none", "minimal" или "low" — если модель тратит вывод на рассуждения.
 CHAT_REASONING_EFFORT = (os.getenv("CHAT_REASONING_EFFORT") or "").strip()
@@ -570,8 +572,22 @@ CHARACTER_CREATION_RULES = """
 # непосредственно перед ответом, поэтому оно и задаёт длину.
 LENGTH_NOTE = """
 [ФОРМАТ ОТВЕТА — ГЛАВНОЕ ПРАВИЛО ЭТОГО ХОДА]
-Пиши 2 полных абзаца по 4–7 предложений (примерно 900–1400 знаков). Первый: что произошло, как отреагировали NPC и мир, одна-две конкретные детали. Второй: последствия для героя, изменение обстановки и зацепка к следующему шагу. Важная сцена — до 4 абзацев, кульминация — до 6. Ответ в одну-две строки считается ошибкой: если сцена не даёт материала, добавь реакцию мира, деталь окружения и зацепку, но не выдумывай новый обязательный сюжет. Проверку по-прежнему заканчивай запросом броска и без итога. Строку награды (+50 XP — квест «Название») оставляй отдельной последней строкой, а не внутри абзаца. При создании персонажа правило двух абзацев не действует: следуй блоку [СТРУКТУРА ПЕРВОГО ОТВЕТА] — лист в метках [[ЛИСТ]], затем 1–2 абзаца открывающей сцены. Если игрок прямо просит показать лист, тоже дай блок [[ЛИСТ]] и после него обычный ответ.
+Подбирай длину по сцене. Ориентиры в токенах: простое действие 50–150, диалог 150–400, исследование 300–600, бой 300–700, поворот истории 600–1200, кульминация 1000–2000. Описывай только значимые детали и последствия. Для ожидающей проверки запроси бросок и оставь исход открытым. Награду (+50 XP — квест «Название») вынеси в последнюю строку. По запросу листа дай блок [[ЛИСТ]] и короткое продолжение.
+У NPC свои цели и ограниченные знания. Мир развивается и без героя, а последствия могут проявляться позднее. Мирные сцены могут оставаться мирными. Игрок может сменить цель или оставить прежний сюжет. Оставляй мысли и решения героя игроку. Числа механик бери из подтверждённых результатов сервера.
 """
+
+
+def narration_budget(action):
+    query = action.strip().casefold()
+    if PASSIVE_OBSERVATION.fullmatch(query) or query.rstrip(".!?") in {
+        "встаю", "жду", "киваю", "я встаю и готовлюсь к действию",
+    }:
+        target = 450
+    elif re.fullmatch(r"/wait\s+\d{1,2}", query):
+        target = 900
+    else:
+        target = NARRATION_MAX_TOKENS
+    return min(target, NARRATION_MAX_TOKENS)
 
 
 STATE_EXTRACT_PROMPT = """
@@ -1358,25 +1374,26 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
     fresh_events = [(event_id, amount) for event_id, amount in awarded_messages
                     if event_id not in known_events]
 
-    recent = _budgeted_dialogue(messages[-3:], STATE_HISTORY_CHARS, preserve_latest=True)
-    latest = recent[-1].get("content", "") if recent and recent[-1].get("role") == "assistant" else ""
-    context_messages = recent[:-1] if latest else recent
-    action = ""
-    if context_messages and context_messages[-1].get("role") == "user":
-        action = context_messages[-1].get("content", "")
-        context_messages = context_messages[:-1]
+    latest = last_reply.get("content", "") if last_reply else ""
+    action_turn = messages[-2] if last_reply and len(messages) >= 2 else None
+    action = action_turn.get("content", "") if action_turn and action_turn.get("role") == "user" else ""
+    context_messages = _budgeted_dialogue(messages[-3:-2], STATE_HISTORY_CHARS)
+    plan = wait_plan(current, action)
+    result_check = (result or {}).get("check") or {}
+    restriction = control_restriction(current, action, waiting=bool(plan) or result_check.get("kind") == "save")
+    if restriction and not current.get("character_setup_pending"):
+        raise ValueError(restriction)
     context = "\n".join(f"{m['role']}: {m['content']}" for m in context_messages if m.get("content"))
     model_state = {key: value for key, value in current.items()
                    if key not in {"xp_event_ids", "quest_xp_awards", "quest_xp_paid_ids",
                                   "last_state_event_id", "level_history", "world_entities", "active_effects", "effect_log"}}
     model_state["facts"] = facts_context(current.get("facts"), action + " " + latest)
-    model_state["world_entities"] = world_context(current, action + " " + latest)
+    model_state["world_entities"] = world_context(current, action + " " + latest, player_query=action)
     model_state["active_effects"] = effect_context(current)
     active_events = [event for event in (current.get("agenda") or [])
                      if isinstance(event, dict) and event.get("status") == "scheduled"]
     model_state["agenda"] = active_events[:12]
     model_state["recent_event_outcomes"] = _recent_event_outcomes(current)
-    plan = wait_plan(current, action)
     if plan:
         model_state["wait_plan"] = plan
     if result:
@@ -1460,6 +1477,8 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
     campaign_scene = dict(campaign_scene)
     history = messages[:max(0, last_index - 1)]
     previous_check = active_check(current, history)
+    if plan and hero_incapacitated(current) and (previous_check or {}).get("kind") != "save":
+        previous_check = None
     resolved_id = (result.get("check") or {}).get("id") if result else None
     resolved_previous = previous_check and resolved_id == previous_check.get("id")
     grounded = lambda evidence: _grounded_event(evidence, latest)
@@ -1752,6 +1771,8 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
         merged = resolve_effects(merged, effect_proposals, latest, minute, blocked,
                                  hero_before=(current["hp"], merged["hp"]))
         check = merged.get("pending_check")
+        if check and check.get("kind") != "save" and hero_incapacitated(merged):
+            merged["pending_check"] = check = None
         if check and check.get("id") != (previous_check or {}).get("id") and isinstance(proposed, dict):
             stat = proposed.get("stat")
             if isinstance(stat, str) and stat in STATS and check.get("kind") in ("check", "attack", "save"):
@@ -2006,6 +2027,10 @@ def api_roll():
         if not isinstance(state, dict) or not isinstance(messages, list):
             raise ValueError("Не удалось прочитать состояние проверки.")
         check = active_check(state, messages)
+        if check and check.get("kind") != "save":
+            restriction = control_restriction(state, "")
+            if restriction:
+                raise ValueError(restriction)
         expression = data.get("expr") or (check["expr"] if check else "1d20")
         if check and formula_key(expression) != formula_key(check["expr"]):
             raise ValueError(f"Ожидается бросок {check['expr']}. Сначала разрешите проверку.")
@@ -2092,8 +2117,14 @@ def api_chat():
     query = str(action.get("content", ""))
     try:
         plan = wait_plan(game_state, query)
-        if plan and check:
+        if plan and check and not (hero_incapacitated(game_state) and check.get("kind") != "save"):
             raise ValueError("Сначала разрешите или отмените ожидающий бросок.")
+        restriction = control_restriction(
+            game_state, query,
+            waiting=bool(plan) or bool(result and (result.get("check") or {}).get("kind") == "save"),
+        )
+        if restriction and not setup_turn:
+            raise ValueError(restriction)
     except ValueError as exc:
         return jsonify({"error": str(exc), "code": "action_invalid"}), 400
     minute = campaign_minute(game_state)
@@ -2116,7 +2147,7 @@ def api_chat():
                        str(state_context["scene"].get("goal", ""))))
     state_context["facts"] = facts_context(game_state.get("facts"), lookup)
     state_context["journal"] = notes_context(game_state.get("notes"), lookup)
-    state_context["world_entities"] = world_context(game_state, lookup)
+    state_context["world_entities"] = world_context(game_state, lookup, player_query=query)
     state_context["active_effects"] = effect_context(game_state)
     if isinstance(game_state.get("hero_form"), dict):
         state_context["hero_form"] = game_state["hero_form"]
@@ -2176,8 +2207,7 @@ def api_chat():
             state_context.pop(field, None)
         if state_context.get("name") == DEFAULT_STATE["name"]:
             state_context.pop("name")
-    # При создании героя структуру ответа задаёт CHARACTER_CREATION_RULES,
-    # поэтому блок двух абзацев не подмешиваем.
+    # Для создания героя формат задаёт CHARACTER_CREATION_RULES.
     turn_rule = ("Используй roll_result как окончательный результат именно указанной проверки. "
                  "Если указан rule_effect, используй рассчитанный HP и не применяй изменение повторно. "
                  "Свободный бросок без check не разрешает действие. При pending_check сохраняй "
@@ -2215,7 +2245,7 @@ def api_chat():
     if inline_enabled:
         messages[0]["content"] += "\nПосле обычного видимого ответа обязательно добавь блок [[STATE_DELTA]]…[[/STATE_DELTA]] согласно протоколу. Это не часть видимой карточки. Не превышай обычную длину повествования; оставь место для JSON."
     visitor_id = request.cookies.get(PRESENCE_COOKIE, "")
-    narration_limit = NARRATION_SETUP_TOKENS if setup_turn else NARRATION_MAX_TOKENS
+    narration_limit = NARRATION_SETUP_TOKENS if setup_turn else narration_budget(query)
     if inline_enabled:
         narration_limit += INLINE_STATE_EXTRA_TOKENS
     inline_data = {"delta": None}
@@ -2455,6 +2485,12 @@ def _commit_party_turn(data):
         reply["content"] = synchronize_clock(reply["content"], new_minute)
     next_check = updated.get("pending_check")
     prior_check = active_check(state, party["messages"])
+    effect_log = updated.get("effect_log") or []
+    if any(re.match(r"Эффект \d+ не применён:", line) for line in effect_log):
+        reply["content"] = "Сцена продолжается. Подтверждённый результат хода указан ниже."
+        location = (updated.get("scene") or {}).get("location")
+        if location:
+            reply["content"] += f" Текущее место: {location}."
     if next_check and next_check.get("id") != (prior_check or {}).get("id"):
         reply["content"] = check_instructions_in_card(reply["content"], next_check)
     if reply["content"] != draft["reply"]["content"]:
@@ -2464,7 +2500,7 @@ def _commit_party_turn(data):
     for event in updated.get("agenda") or []:
         if isinstance(event, dict) and event.get("no_report") and event.get("id") not in previous_events:
             details.append(f"{event['title']}: {event['outcome']}")
-    details.extend(updated.get("effect_log") or [])
+    details.extend(effect_log)
     if details and state.get("race") and state.get("class") and not state.get("character_setup_pending"):
         reply["resolution"] = " · ".join(details)
     saved = PARTIES.commit(owner, party_id, revision, request_id, updated, reply)

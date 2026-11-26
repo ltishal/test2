@@ -29,6 +29,17 @@ class EffectsTest(unittest.TestCase):
     def test_signed_and_duplicate_hp_blocked(self):
         s=self.run_effects(self.p('damage',target='wolf',amount=8),self.p('damage',target='hero',amount=3),self.p('damage',target='hero',amount=3),blocked_hp={'wolf'})
         self.assertEqual(s['world_entities'][0]['hp'],20); self.assertEqual(s['hp'],17)
+    def test_distinct_hits_accumulate_but_a_repeat_does_not(self):
+        first = 'Стражник попадает копьём.'
+        second = 'Камень ударяет в плечо.'
+        effects = [
+            self.p('damage', target='hero', amount=3, evidence=first),
+            self.p('damage', target='hero', amount=4, evidence=second),
+            self.p('damage', target='hero', amount=4, evidence=second),
+        ]
+        state = resolve_effects(self.state, effects, first + ' ' + second, 100)
+        self.assertEqual(state['hp'], 13)
+        self.assertIn('Повтор события', state['effect_log'][-1])
     def test_explicit_hp_replaces_legacy_delta(self):
         s=self.run_effects(self.p('damage',target='hero',amount=5),state={**self.state,'hp':15},hero_before=(20,15))
         self.assertEqual(s['hp'],15)

@@ -1394,14 +1394,10 @@ async function callAI(pending) {
       const reader = res.body.getReader();
       const dec = new TextDecoder();
       let full = '';
-      md.classList.remove('typing-indicator');
       while (true) {
         const {done, value} = await reader.read();
         if (done) break;
         full += dec.decode(value, {stream: true});
-        md.textContent = full.replaceAll('[[ЛИСТ]]', '').replaceAll('[[/ЛИСТ]]', '')
-          .split('[[ХОД_ЗАВЕРШЁН]]')[0];
-        scrollBottom();
       }
       full += dec.decode();
       const failure = full.indexOf('[Ошибка API:');
@@ -1413,8 +1409,7 @@ async function callAI(pending) {
       persist();
     }
     md.classList.remove('typing-indicator');
-    md.textContent = draft.reply.content.replaceAll('[[ЛИСТ]]', '').replaceAll('[[/ЛИСТ]]', '')
-      + '\n\nСохраняю ход…';
+    md.textContent = 'Проверяю результат хода…';
     scrollBottom();
     const oldLevel = Number(state?.level || 1);
     const snapshot = await partyRequest('/api/state', {...partyPayload(), request_id: draft.requestId});

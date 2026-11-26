@@ -36,6 +36,31 @@ class ProtocolTest(unittest.TestCase):
 
 
 class DynamicWorldTest(unittest.TestCase):
+    def test_named_remote_npc_survives_a_crowded_scene_after_many_turns(self):
+        mara = {'id': 'mara', 'kind': 'npc', 'name': 'Мара', 'location': 'Серый Брод',
+                'description': 'Хозяйка трактира, отдала герою журнал.'}
+        state = {'world_entities': [mara], 'scene': {'location': 'Башня'}}
+        for index in range(40):
+            state['world_entities'].append({'id': str(index), 'kind': 'npc', 'name': f'Стражник {index}',
+                                            'location': 'Башня', 'description': 'Уже знакомый часовой.'})
+        context = world_context(state, 'Расспрашиваю о Маре.')
+        self.assertEqual(context[0]['id'], 'mara')
+        self.assertIn('журнал', context[0]['description'])
+        self.assertLessEqual(len(context), 12)
+
+    def test_existing_npc_gains_combat_stats_without_losing_identity(self):
+        original = {'id': 'mara', 'kind': 'npc', 'name': 'Мара', 'attitude': -10,
+                    'description': 'Хозяйка трактира.'}
+        evidence = 'Мара обнажает кинжал.'
+        proposal = {'id': 'mara', 'threat': 'dangerous', 'evidence': evidence}
+        state = {'world_entities': [original]}
+        updated = merge_entities(state, [proposal], evidence)[0]
+        self.assertEqual({field: updated[field] for field in original}, original)
+        self.assertTrue(31 <= updated['hp'] <= 65)
+        updated['hp'] -= 5
+        replay = merge_entities({'world_entities': [updated]}, [proposal], evidence)[0]
+        self.assertEqual(replay['hp'], updated['hp'])
+
     def setUp(self):
         self.reply='Из тени вышел Пожиратель снов.'
         self.patch={'kind':'creature','name':'Пожиратель снов','threat':'dangerous','description':'Шесть глаз', 'location':'Лес','evidence':self.reply,'hp':99999}

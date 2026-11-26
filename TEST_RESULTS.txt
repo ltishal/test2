@@ -1,4 +1,4 @@
-Alpha 2: Python compileall OK; JavaScript node --check OK
+Alpha 2.1: Python compileall OK. JavaScript node --check OK.
 
 test_character_identity_keeps_chosen_fields_and_fills_skipped_fields (test_campaign.CampaignTest.test_character_identity_keeps_chosen_fields_and_fills_skipped_fields) ... ok
 test_damage_calculation_and_capped_healing (test_campaign.CampaignTest.test_damage_calculation_and_capped_healing) ... ok
@@ -17,7 +17,9 @@ test_wait_targets_and_event_once (test_campaign.CampaignTest.test_wait_targets_a
 test_arbitrary_content_not_catalogue (test_dynamic_world.DynamicWorldTest.test_arbitrary_content_not_catalogue) ... ok
 test_context_bounded_and_relevant (test_dynamic_world.DynamicWorldTest.test_context_bounded_and_relevant) ... ok
 test_death_preserved_and_new_target_resolution (test_dynamic_world.DynamicWorldTest.test_death_preserved_and_new_target_resolution) ... ok
+test_existing_npc_gains_combat_stats_without_losing_identity (test_dynamic_world.DynamicWorldTest.test_existing_npc_gains_combat_stats_without_losing_identity) ... ok
 test_legacy_saves_without_registry (test_dynamic_world.DynamicWorldTest.test_legacy_saves_without_registry) ... ok
+test_named_remote_npc_survives_a_crowded_scene_after_many_turns (test_dynamic_world.DynamicWorldTest.test_named_remote_npc_survives_a_crowded_scene_after_many_turns) ... ok
 test_new_creature_server_stats_and_reuse (test_dynamic_world.DynamicWorldTest.test_new_creature_server_stats_and_reuse) ... ok
 test_signed_roll_applies_damage_only_to_bound_target (test_dynamic_world.DynamicWorldTest.test_signed_roll_applies_damage_only_to_bound_target) ... ok
 test_unknown_id_identity_and_evidence_rejected (test_dynamic_world.DynamicWorldTest.test_unknown_id_identity_and_evidence_rejected) ... ok
@@ -30,6 +32,7 @@ test_control_and_dispel (test_effects.EffectsTest.test_control_and_dispel) ... o
 test_create_move_transform_environment_relation (test_effects.EffectsTest.test_create_move_transform_environment_relation) ... ok
 test_damage_heal_and_no_mutation (test_effects.EffectsTest.test_damage_heal_and_no_mutation) ... ok
 test_death_is_not_reversed_by_heal (test_effects.EffectsTest.test_death_is_not_reversed_by_heal) ... ok
+test_distinct_hits_accumulate_but_a_repeat_does_not (test_effects.EffectsTest.test_distinct_hits_accumulate_but_a_repeat_does_not) ... ok
 test_drain_conserves_resource_and_invalid_is_atomic (test_effects.EffectsTest.test_drain_conserves_resource_and_invalid_is_atomic) ... ok
 test_evidence_unknown_target_and_bool_rejected (test_effects.EffectsTest.test_evidence_unknown_target_and_bool_rejected) ... ok
 test_explicit_hp_replaces_legacy_delta (test_effects.EffectsTest.test_explicit_hp_replaces_legacy_delta) ... ok
@@ -38,19 +41,15 @@ test_modifier_and_roll (test_effects.EffectsTest.test_modifier_and_roll) ... ok
 test_protocol_effects_and_protected_fields (test_effects.EffectsTest.test_protocol_effects_and_protected_fields) ... ok
 test_schedule_ticks_and_expiration (test_effects.EffectsTest.test_schedule_ticks_and_expiration) ... ok
 test_signed_and_duplicate_hp_blocked (test_effects.EffectsTest.test_signed_and_duplicate_hp_blocked) ... ok
-[boot] app_revision=2026-11-27.world-alpha2 | env=нет (только переменные окружения) | provider=OpenAI-compatible | model=gpt-4o-mini | base_url=http://invalid.invalid | timeout=300s | narration_max_tokens=900 | narration_setup_tokens=2200
-test_broken_metadata_uses_old_extractor (test_inline_integration.InlineIntegrationTest.test_broken_metadata_uses_old_extractor) ... [chat] queue_ms=0 first_text_ms=1 response_ms=8 attempts=1 output_tokens=-
-[state] mode=extract turn=80a1b0d415a34fe980e75de9962f89c7
-ok
+test_broken_metadata_uses_old_extractor (test_inline_integration.InlineIntegrationTest.test_broken_metadata_uses_old_extractor) ... ok
 test_effect_fields_not_overwritten_by_fallback (test_inline_integration.InlineIntegrationTest.test_effect_fields_not_overwritten_by_fallback) ... ok
 test_effects_clock_and_signed_damage (test_inline_integration.InlineIntegrationTest.test_effects_clock_and_signed_damage) ... ok
-test_effects_commit_and_retry (test_inline_integration.InlineIntegrationTest.test_effects_commit_and_retry) ... [chat] queue_ms=0 first_text_ms=1 response_ms=4 attempts=1 output_tokens=-
-[state] mode=inline turn=0007c578b1bf41bf93642bfe71ab51ae
-ok
+test_effects_commit_and_retry (test_inline_integration.InlineIntegrationTest.test_effects_commit_and_retry) ... ok
 test_inline_signed_npc_damage (test_inline_integration.InlineIntegrationTest.test_inline_signed_npc_damage) ... ok
-test_one_call_persists_world_and_retries_do_not_repeat (test_inline_integration.InlineIntegrationTest.test_one_call_persists_world_and_retries_do_not_repeat) ... [chat] queue_ms=0 first_text_ms=1 response_ms=5 attempts=1 output_tokens=-
-[state] mode=inline turn=51a52476fef34337a76d2005674a44f7
-ok
+test_long_narration_preserves_the_player_action_for_the_clock (test_inline_integration.InlineIntegrationTest.test_long_narration_preserves_the_player_action_for_the_clock) ... ok
+test_one_call_persists_world_and_retries_do_not_repeat (test_inline_integration.InlineIntegrationTest.test_one_call_persists_world_and_retries_do_not_repeat) ... ok
+test_paralysis_blocks_attack_and_expires_during_wait (test_inline_integration.InlineIntegrationTest.test_paralysis_blocks_attack_and_expires_during_wait) ... ok
+test_rejected_effect_is_not_in_published_story (test_inline_integration.InlineIntegrationTest.test_rejected_effect_is_not_in_published_story) ... ok
 test_cancel_keeps_previous_state_and_durable_summary_never_moves_backwards (test_party_store.PartyStoreTest.test_cancel_keeps_previous_state_and_durable_summary_never_moves_backwards) ... ok
 test_concurrent_retries_only_commit_one_result (test_party_store.PartyStoreTest.test_concurrent_retries_only_commit_one_result) ... ok
 test_notes_update_only_the_current_party (test_party_store.PartyStoreTest.test_notes_update_only_the_current_party) ... ok
@@ -59,6 +58,6 @@ test_owners_and_characters_are_independent (test_party_store.PartyStoreTest.test
 test_restart_restores_draft_and_commit_is_idempotent (test_party_store.PartyStoreTest.test_restart_restores_draft_and_commit_is_idempotent) ... ok
 
 ----------------------------------------------------------------------
-Ran 50 tests in 0.141s
+Ran 56 tests in 0.540s
 
 OK

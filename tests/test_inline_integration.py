@@ -132,3 +132,33 @@ class InlineIntegrationTest(unittest.TestCase):
         with patch.object(self.m,'_measured_completion',return_value=result):
             updated=self.m.extract_state(history,state,'test')
         self.assertEqual(updated['mana'],2); self.assertEqual(updated['active_effects'],[]); self.assertNotIn('hero_form',updated)
+
+    def test_rejected_effect_is_not_in_published_story(self):
+        import json
+        story = 'Мост замерзает.'
+        delta = {'effects': [{'type': 'environment', 'target': 'unknown', 'environment': 'лёд', 'evidence': story}]}
+        self.stream(story + START + json.dumps(delta, ensure_ascii=False) + END)
+        with patch.object(self.m, '_measured_completion', side_effect=AssertionError('Unexpected call')):
+            saved = self.commit()
+        self.assertNotIn(story, saved['messages'][-1]['content'])
+        self.assertIn('Цель не найдена', saved['messages'][-1]['resolution'])
+
+    def test_long_narration_preserves_the_player_action_for_the_clock(self):
+        state = {**self.m.DEFAULT_STATE, 'race': 'Эльф', 'class': 'Маг', 'world_minute': 600}
+        history = [
+            {'role': 'user', 'content': '/wait 10'},
+            {'role': 'assistant', 'content': 'Мир продолжается. ' * 180},
+        ]
+        updated = self.m.extract_state(history, state, inline_delta={})
+        self.assertEqual(updated['world_minute'], 610)
+
+    def test_paralysis_blocks_attack_and_expires_during_wait(self):
+        state = {**self.m.DEFAULT_STATE, 'race': 'Эльф', 'class': 'Маг', 'world_minute': 600,
+                 'active_effects': [{'id': 'hold', 'type': 'control', 'target': 'hero',
+                                     'control': 'paralysis', 'expires': 605}]}
+        history = [{'role': 'user', 'content': 'Атакую.'}, {'role': 'assistant', 'content': 'Герой атакует.'}]
+        with self.assertRaisesRegex(ValueError, 'паралич'):
+            self.m.extract_state(history, state, inline_delta={})
+        history = [{'role': 'user', 'content': '/wait 5'}, {'role': 'assistant', 'content': 'Проходит пять минут.'}]
+        updated = self.m.extract_state(history, state, inline_delta={})
+        self.assertEqual(updated['active_effects'], [])
