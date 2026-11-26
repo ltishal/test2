@@ -1,0 +1,45 @@
+test_character_identity_keeps_chosen_fields_and_fills_skipped_fields (test_campaign.CampaignTest.test_character_identity_keeps_chosen_fields_and_fills_skipped_fields) ... ok
+test_damage_calculation_and_capped_healing (test_campaign.CampaignTest.test_damage_calculation_and_capped_healing) ... ok
+test_dice_reject_mismatched_check_and_formula (test_campaign.CampaignTest.test_dice_reject_mismatched_check_and_formula) ... ok
+test_dragon_breath_matches_legacy_name_with_a_damage_description (test_campaign.CampaignTest.test_dragon_breath_matches_legacy_name_with_a_damage_description) ... ok
+test_duplicate_formula_keeps_a_structured_check (test_campaign.CampaignTest.test_duplicate_formula_keeps_a_structured_check) ... ok
+test_elapsed_time_is_charged_once_per_check (test_campaign.CampaignTest.test_elapsed_time_is_charged_once_per_check) ... ok
+test_explicit_arrival_and_wait_clock (test_campaign.CampaignTest.test_explicit_arrival_and_wait_clock) ... ok
+test_legacy_check_survives_request_with_trimmed_history (test_campaign.CampaignTest.test_legacy_check_survives_request_with_trimmed_history) ... ok
+test_legacy_unlimited_ability_has_no_charge_counter (test_campaign.CampaignTest.test_legacy_unlimited_ability_has_no_charge_counter) ... ok
+test_npc_statements_cannot_replace_confirmed_actions (test_campaign.CampaignTest.test_npc_statements_cannot_replace_confirmed_actions) ... ok
+test_rest_and_spending (test_campaign.CampaignTest.test_rest_and_spending) ... ok
+test_scene_identity_and_transfer_of_a_clue (test_campaign.CampaignTest.test_scene_identity_and_transfer_of_a_clue) ... ok
+test_undated_errand_has_a_check_in_and_can_get_a_late_outcome (test_campaign.CampaignTest.test_undated_errand_has_a_check_in_and_can_get_a_late_outcome) ... ok
+test_wait_targets_and_event_once (test_campaign.CampaignTest.test_wait_targets_and_event_once) ... ok
+test_arbitrary_content_not_catalogue (test_dynamic_world.DynamicWorldTest.test_arbitrary_content_not_catalogue) ... ok
+test_context_bounded_and_relevant (test_dynamic_world.DynamicWorldTest.test_context_bounded_and_relevant) ... ok
+test_death_preserved_and_new_target_resolution (test_dynamic_world.DynamicWorldTest.test_death_preserved_and_new_target_resolution) ... ok
+test_legacy_saves_without_registry (test_dynamic_world.DynamicWorldTest.test_legacy_saves_without_registry) ... ok
+test_new_creature_server_stats_and_reuse (test_dynamic_world.DynamicWorldTest.test_new_creature_server_stats_and_reuse) ... ok
+test_signed_roll_applies_damage_only_to_bound_target (test_dynamic_world.DynamicWorldTest.test_signed_roll_applies_damage_only_to_bound_target) ... ok
+test_unknown_id_identity_and_evidence_rejected (test_dynamic_world.DynamicWorldTest.test_unknown_id_identity_and_evidence_rejected) ... ok
+test_every_chunk_boundary (test_dynamic_world.ProtocolTest.test_every_chunk_boundary) ... ok
+test_invalid_truncated_and_null_fall_back (test_dynamic_world.ProtocolTest.test_invalid_truncated_and_null_fall_back) ... ok
+test_missing_block_and_empty_delta (test_dynamic_world.ProtocolTest.test_missing_block_and_empty_delta) ... ok
+test_overlong_metadata_not_visible (test_dynamic_world.ProtocolTest.test_overlong_metadata_not_visible) ... ok
+test_protected_fields_and_bad_types (test_dynamic_world.ProtocolTest.test_protected_fields_and_bad_types) ... ok
+[boot] app_revision=2026-11-27.world-alpha1 | env=нет (только переменные окружения) | provider=OpenAI-compatible | model=gpt-4o-mini | base_url=http://invalid.invalid | timeout=300s | narration_max_tokens=900 | narration_setup_tokens=2200
+test_broken_metadata_uses_old_extractor (test_inline_integration.InlineIntegrationTest.test_broken_metadata_uses_old_extractor) ... [chat] queue_ms=0 first_text_ms=1 response_ms=6 attempts=1 output_tokens=-
+[state] mode=extract turn=62d984d044254bcaa7400878e00d61b5
+ok
+test_inline_signed_npc_damage (test_inline_integration.InlineIntegrationTest.test_inline_signed_npc_damage) ... ok
+test_one_call_persists_world_and_retries_do_not_repeat (test_inline_integration.InlineIntegrationTest.test_one_call_persists_world_and_retries_do_not_repeat) ... [chat] queue_ms=0 first_text_ms=1 response_ms=4 attempts=1 output_tokens=-
+[state] mode=inline turn=f4283889e4564392a50a7914debdc54a
+ok
+test_cancel_keeps_previous_state_and_durable_summary_never_moves_backwards (test_party_store.PartyStoreTest.test_cancel_keeps_previous_state_and_durable_summary_never_moves_backwards) ... ok
+test_concurrent_retries_only_commit_one_result (test_party_store.PartyStoreTest.test_concurrent_retries_only_commit_one_result) ... ok
+test_notes_update_only_the_current_party (test_party_store.PartyStoreTest.test_notes_update_only_the_current_party) ... ok
+test_other_tab_cannot_commit_from_an_old_revision (test_party_store.PartyStoreTest.test_other_tab_cannot_commit_from_an_old_revision) ... ok
+test_owners_and_characters_are_independent (test_party_store.PartyStoreTest.test_owners_and_characters_are_independent) ... ok
+test_restart_restores_draft_and_commit_is_idempotent (test_party_store.PartyStoreTest.test_restart_restores_draft_and_commit_is_idempotent) ... ok
+
+----------------------------------------------------------------------
+Ran 35 tests in 0.136s
+
+OK

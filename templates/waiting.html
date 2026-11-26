@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="10; url=/">
+  <meta name="theme-color" content="#1a1614">
+  <title>Все места заняты · RPG ИИ-Мастер</title>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      margin: 0; padding: 1.5rem; min-height: 100svh; box-sizing: border-box;
+      display: grid; place-items: center;
+      background: radial-gradient(ellipse at 50% 0%, #2a2420, #0f0d0c 70%);
+      color: #e8e0d5; font-family: system-ui, sans-serif;
+    }
+    main { max-width: 31rem; padding: 2rem; background: #1a1614; border: 1px solid #3a342f; border-radius: 12px; }
+    h1 { margin: 0 0 1rem; color: #c9a227; font: 1.7rem Georgia, serif; }
+    p { margin: .75rem 0; line-height: 1.55; }
+    a { display: inline-block; padding: .4rem 0; color: #e7c760; }
+    small { color: #a89f94; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Все места в игре заняты</h1>
+    <p>Онлайн {{ presence.online }}/{{ presence.limit }} · Играют с мастером {{ presence.playing }}</p>
+    <p><small>Страница автоматически проверяет свободные места каждые 10 секунд.</small></p>
+    <a href="/">Проверить сейчас</a>
+  </main>
+</body>
+</html>
