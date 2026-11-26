@@ -38,11 +38,13 @@ from engine.turn_protocol import DeltaStream, PROTOCOL_PROMPT, validate_delta
 from engine.world import (WORLD_PROMPT, world_context, merge_entities, npc_damage,
                           bind_damage_target, apply_npc_damage)
 
+from engine.effects import EFFECT_PROMPT, resolve_effects, effect_context, check_bonus, STATS
+
 from party_store import PartyConflict, PartyMissing, PartyStore
 from token_usage import TokenUsage, state_turn_id
 
 BASE_DIR = Path(__file__).resolve().parent
-APP_REVISION = "2026-11-27.world-alpha1"
+APP_REVISION = "2026-11-27.world-alpha2"
 QWEN_SUMMARY_LIMIT = 480
 QWEN_STATE_LIMIT = 1100
 QWEN_STATE_SETUP_LIMIT = 2200
@@ -1320,7 +1322,7 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
         check = active_check(current, messages[:-2])
         if not check or check.get("kind") != "check":
             raise ValueError("Нет необязательной проверки для отмены.")
-        return {**current, "pending_check": None}
+        return {**current, "pending_check": None, "effect_log": []}
     current["abilities"] = normalize_abilities(current.get("abilities"))
     next_upgrade_level = _next_upgrade_level(current)
     last_index = len(messages) - 1
@@ -1366,9 +1368,10 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
     context = "\n".join(f"{m['role']}: {m['content']}" for m in context_messages if m.get("content"))
     model_state = {key: value for key, value in current.items()
                    if key not in {"xp_event_ids", "quest_xp_awards", "quest_xp_paid_ids",
-                                  "last_state_event_id", "level_history", "world_entities"}}
+                                  "last_state_event_id", "level_history", "world_entities", "active_effects", "effect_log"}}
     model_state["facts"] = facts_context(current.get("facts"), action + " " + latest)
     model_state["world_entities"] = world_context(current, action + " " + latest)
+    model_state["active_effects"] = effect_context(current)
     active_events = [event for event in (current.get("agenda") or [])
                      if isinstance(event, dict) and event.get("status") == "scheduled"]
     model_state["agenda"] = active_events[:12]
@@ -1410,7 +1413,7 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
     new_character = (current.get("character_setup_pending")
                      or not (current.get("race") and current.get("class")))
     state_limit = QWEN_STATE_SETUP_LIMIT if new_character or next_upgrade_level is not None else QWEN_STATE_LIMIT
-    state_messages = [{"role": "system", "content": STATE_EXTRACT_PROMPT + WORLD_PROMPT},
+    state_messages = [{"role": "system", "content": STATE_EXTRACT_PROMPT + WORLD_PROMPT + EFFECT_PROMPT},
                       {"role": "user", "content": prompt}]
     if inline_delta is not None and not new_character:
         new_state = validate_delta(inline_delta)
@@ -1480,6 +1483,10 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
     campaign_facts = merge_facts(current.get("facts"), new_state.pop("facts", None))
     campaign_facts = record_npc_actions(campaign_facts, new_state.pop("npc_actions", None),
                                         campaign_scene, minute, grounded)
+    effect_proposals = new_state.pop("effects", None)
+    # Never trust direct writes to engine-owned fields, including legacy extraction.
+    for protected in ("active_effects", "effect_log", "mana", "max_mana", "hero_form"):
+        new_state.pop(protected, None)
     world_patches = new_state.pop("world_entities", None)
     entities = merge_entities(current, world_patches, latest)
     npc_outcome = npc_damage(current, result)
@@ -1738,6 +1745,18 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
     merged["notes"] = [n for n in (normalize_note(x) for x in merged["notes"]) if n]
     if new_character:
         merged.pop("character_setup_pending", None)
+    else:
+        blocked = set()
+        if rules_result(current, result): blocked.add("hero")
+        if npc_outcome: blocked.add(npc_outcome["id"])
+        merged = resolve_effects(merged, effect_proposals, latest, minute, blocked,
+                                 hero_before=(current["hp"], merged["hp"]))
+        check = merged.get("pending_check")
+        if check and check.get("id") != (previous_check or {}).get("id") and isinstance(proposed, dict):
+            stat = proposed.get("stat")
+            if isinstance(stat, str) and stat in STATS and check.get("kind") in ("check", "attack", "save"):
+                check["stat"] = stat
+                check["effect_bonus"] = check_bonus(merged, stat)
     return merged
 
 
@@ -2098,6 +2117,11 @@ def api_chat():
     state_context["facts"] = facts_context(game_state.get("facts"), lookup)
     state_context["journal"] = notes_context(game_state.get("notes"), lookup)
     state_context["world_entities"] = world_context(game_state, lookup)
+    state_context["active_effects"] = effect_context(game_state)
+    if isinstance(game_state.get("hero_form"), dict):
+        state_context["hero_form"] = game_state["hero_form"]
+    if type(game_state.get("mana")) is int:
+        state_context.update(mana=game_state["mana"], max_mana=game_state.get("max_mana"))
     if result:
         state_context["roll_result"] = result
         state_context["rule_effect"] = rules_result(game_state, result)
@@ -2179,9 +2203,9 @@ def api_chat():
     }] + messages[1:]
     inline_enabled = bool(party and not setup_turn and next_upgrade_level is None and INLINE_STATE_ENABLED)
     if inline_enabled:
-        messages[0]["content"] += "\n\n" + PROTOCOL_PROMPT + STATE_EXTRACT_PROMPT + WORLD_PROMPT
+        messages[0]["content"] += "\n\n" + PROTOCOL_PROMPT + STATE_EXTRACT_PROMPT + WORLD_PROMPT + EFFECT_PROMPT
     else:
-        messages[0]["content"] += "\nИспользуй npc_rule_effect как окончательный результат урона существу, если он указан."
+        messages[0]["content"] += "\nУчитывай active_effects; тики рассчитывает сервер. Используй npc_rule_effect как окончательный результат урона существу, если он указан."
     turn_id = request_id or uuid4().hex
     messages = _messages_with_memory(
         messages, _header_token("X-Session-Id", 64), character_setup=setup_turn,
@@ -2440,6 +2464,7 @@ def _commit_party_turn(data):
     for event in updated.get("agenda") or []:
         if isinstance(event, dict) and event.get("no_report") and event.get("id") not in previous_events:
             details.append(f"{event['title']}: {event['outcome']}")
+    details.extend(updated.get("effect_log") or [])
     if details and state.get("race") and state.get("class") and not state.get("character_setup_pending"):
         reply["resolution"] = " · ".join(details)
     saved = PARTIES.commit(owner, party_id, revision, request_id, updated, reply)

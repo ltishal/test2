@@ -220,6 +220,17 @@
   .modal-content { background: var(--bg-panel); border: 1px solid var(--border-subtle); border-radius: 14px; padding: 24px; width: 100%; max-width: 460px; max-height: 85vh; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; }
   .modal-content h3 { margin: 0 0 4px; font-size: 18px; font-family: var(--font-serif); color: var(--accent-gold); }
   .modal-content input { width: 100%; background: var(--bg-deep); border: 1px solid var(--border-subtle); color: var(--text-primary); border-radius: 8px; padding: 12px 14px; font-size: 16px; font-family: var(--font-sans); outline: none; }
+  .world-tabs { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px; }
+  .world-tabs .btn { display:flex; justify-content:space-between; align-items:center; gap:6px; font-size:13px; padding:8px 10px; white-space:normal; text-align:left; }
+  .world-tabs .btn[aria-pressed="true"] { border-color:var(--accent-gold); color:var(--accent-gold); background:var(--bg-deep); }
+  .world-count { font-size:12px; opacity:.8; }
+  .world-group { display:grid; gap:8px; margin:0 0 14px; }
+  .world-group h4 { color:var(--accent-gold); font-size:14px; margin:4px 0; }
+  .world-entry { border:1px solid var(--border-subtle); border-radius:9px; padding:11px; display:grid; gap:6px; overflow-wrap:anywhere; }
+  .world-entry p { margin:0; font-size:14px; line-height:1.45; }
+  .world-meta { color:var(--text-secondary); font-size:12px; }
+  .world-entry strong { font-size:15px; }
+  .world-actions { display:flex; gap:8px; justify-content:space-between; }
   #character-builder {
     width: min(680px, calc(100% - 24px)); max-height: 92dvh;
     padding: 0; border: 1px solid var(--border-subtle); border-radius: 16px;
@@ -427,6 +438,7 @@
     <button class="btn" data-action="sheet">📜 Полный лист</button>
     <button class="btn" data-action="wait">⌛ Время и события</button>
     <button class="btn" data-action="world">🌍 Энциклопедия мира</button>
+    <button class="btn" data-action="effects">✨ Активные эффекты</button>
     <button class="btn" data-action="skills">🎯 Умения и навыки</button>
     <button class="btn" data-action="notes">📝 Заметки <span class="drawer-badge" id="drawer-notes-badge" style="display:none">0</span></button>
   </div>
@@ -1052,6 +1064,9 @@ function renderStatus() {
       ${covChip}
       ${restrChip}
       ${dcChip}
+      ${state.hero_form?.form ? '<span class="status-chip">Форма: '+esc(state.hero_form.form)+'</span>' : ''}
+      ${Array.isArray(state.active_effects)&&state.active_effects.length ? '<span class="status-chip">✨ Эффекты: '+state.active_effects.length+'</span>' : ''}
+      ${Number.isInteger(state.mana)&&Number.isInteger(state.max_mana) ? '<span class="status-chip">Мана: '+state.mana+'/'+state.max_mana+'</span>' : ''}
     </div>
     <div class="status-row"><span style="color:#d45a5a;font-size:11px;width:20px">HP</span>
       <div class="bar-wrap"><div class="bar-fill bar-hp" style="width:${hpPct}%"></div></div>
@@ -1454,7 +1469,7 @@ function renderPendingCheck() {
   notice.id = 'pending-check';
   const button = document.createElement('button');
   button.className = 'btn';
-  button.textContent = '🎲 Бросить ' + check.expr;
+  button.textContent = '🎲 Бросить ' + check.expr + (check.effect_bonus ? ' (эффект '+(check.effect_bonus>0?'+':'')+check.effect_bonus+')' : '');
   button.onclick = () => doRoll(check.expr);
   notice.appendChild(button);
   if (check.kind === 'check') {
@@ -1494,6 +1509,7 @@ function handleCommand(cmd, arg) {
     case '/cancel-check': return cancelPendingCheck();
     case '/wait': return arg ? waitForScene(arg) : showAgenda();
     case '/world': return showWorldCodex();
+    case '/effects': return showActiveEffects();
     case '/sheet': return doSheet();
     case '/skills': return doSkills();
     case '/notes': return doNotes();
@@ -1518,34 +1534,65 @@ function waitForScene(target) {
   return callAI({role: 'user', content: action});
 }
 
-/* Read-only view of the discovered, persistent world; no model call. */
+/* Read-only codex: category navigation, grouped results, no model call. */
 function showWorldCodex() {
-  const labels = {npc:'NPC', creature:'Существо', item:'Предмет', location:'Локация',
-                  faction:'Фракция', ability:'Способность', other:'Другое'};
-  const entities = Array.isArray(state?.world_entities) ? state.world_entities.filter(e => e && typeof e.name === 'string') : [];
-  modalContent.innerHTML = '<h3>🌍 Энциклопедия мира</h3><p>Открытые объекты сохраняются в этой партии. Всего: '
-    + entities.length + '</p><input type="search" placeholder="Поиск по имени или описанию" aria-label="Поиск по миру" id="world-search">'
-    + '<div id="world-records"></div><button type="button" class="btn" id="world-close">Закрыть</button>';
-  const field = modalContent.querySelector('#world-search');
-  const list = modalContent.querySelector('#world-records');
-  function render() {
-    const query = field.value.trim().toLocaleLowerCase('ru');
-    const matches = [...entities].reverse().filter(e => [e.name,e.description,e.location,e.traits,labels[e.kind]]
-      .filter(v => typeof v === 'string').join(' ').toLocaleLowerCase('ru').includes(query));
-    list.innerHTML = matches.slice(0,100).map(e => '<div class="sheet-row" style="display:block;margin:10px 0">'
-      + '<strong>' + esc(e.name) + '</strong> · ' + esc(labels[e.kind] || 'Объект')
-      + (e.location ? '<p>📍 ' + esc(e.location) + '</p>' : '')
-      + (e.description ? '<p>' + esc(e.description) + '</p>' : '')
-      + (e.traits ? '<p>' + esc(e.traits) + '</p>' : '')
-      + (e.status ? '<p>' + esc(e.status) + '</p>' : '')
-      + (Number.isInteger(e.hp) && Number.isInteger(e.max_hp) ? '<p>HP: ' + e.hp + '/' + e.max_hp + '</p>' : '')
-      + '</div>').join('') || '<p>Пока нет подходящих записей. Продолжайте приключение.</p>';
-    if (matches.length > 100) list.insertAdjacentHTML('beforeend','<p>Показано 100 из '+matches.length+'. Уточните поиск.</p>');
+  const categories = [['all','Все'],['npc','Персонажи (NPC)'],['creature','Существа'],['item','Предметы'],['location','Локации'],['faction','Фракции'],['ability','Способности'],['other','Прочее']];
+  const labels = Object.fromEntries(categories);
+  const singular = {npc:'Персонаж',creature:'Существо',item:'Предмет',location:'Локация',faction:'Фракция',ability:'Способность',other:'Объект'};
+  const statuses = {present:'Присутствует',alive:'Жив',dead:'Мёртв',defeated:'Побеждён',unknown:'Неизвестно',missing:'Пропал',absent:'Отсутствует',destroyed:'Уничтожен',active:'Активен',inactive:'Неактивен',discovered:'Обнаружено',available:'Доступно',owned:'Во владении',lost:'Утрачен'};
+  const entities = Array.isArray(state?.world_entities) ? state.world_entities.filter(e=>e && typeof e.name==='string') : [];
+  const kind = e => Object.hasOwn(singular,e.kind) ? e.kind : 'other';
+  const normalize = v => String(v??'').toLocaleLowerCase('ru').replace(/ё/g,'е');
+  const status = e => statuses[normalize(e.status)] || e.status || '';
+  let selected='all', visible=30;
+  modalContent.innerHTML='<h3>🌍 Энциклопедия мира</h3><p class="world-meta">Открытые объекты: '+entities.length+'</p>'
+    +'<input type="search" placeholder="Поиск по миру" aria-label="Поиск по миру" id="world-search">'
+    +'<div class="world-tabs" id="world-tabs" role="group" aria-label="Категории энциклопедии"></div>'
+    +'<p id="world-summary" class="world-meta" aria-live="polite"></p><div id="world-records"></div>'
+    +'<div class="world-actions"><button type="button" class="btn" id="world-more" hidden>Показать ещё</button><button type="button" class="btn" id="world-close">Закрыть</button></div>';
+  const field=modalContent.querySelector('#world-search'), list=modalContent.querySelector('#world-records');
+  const tabs=modalContent.querySelector('#world-tabs'), more=modalContent.querySelector('#world-more');
+  tabs.innerHTML=categories.map(([id,title])=>'<button type="button" class="btn" data-category="'+id+'" aria-pressed="'+(id==='all')+'">'+esc(title)+'<span class="world-count">'+(id==='all'?entities.length:entities.filter(e=>kind(e)===id).length)+'</span></button>').join('');
+  function card(e) {
+    return '<article class="world-entry"><strong>'+esc(e.name)+'</strong><span class="world-meta">'+esc(singular[kind(e)])+'</span>'
+      +(e.location?'<p>📍 '+esc(e.location)+'</p>':'')+(e.description?'<p>'+esc(e.description)+'</p>':'')
+      +(e.traits?'<p>'+esc(e.traits)+'</p>':'')+(e.form?'<p>Форма: '+esc(e.form)+'</p>':'')
+      +(e.environment?'<p>Окружение: '+esc(e.environment)+'</p>':'')+(status(e)?'<span class="world-meta">Статус: '+esc(status(e))+'</span>':'')
+      +(Number.isInteger(e.hp)&&Number.isInteger(e.max_hp)?'<p>HP: '+e.hp+'/'+e.max_hp+'</p>':'')
+      +(Number.isInteger(e.mana)&&Number.isInteger(e.max_mana)?'<p>Мана: '+e.mana+'/'+e.max_mana+'</p>':'')
+      +(Number.isInteger(e.attitude)?'<p>Отношение: '+e.attitude+' / 100</p>':'')+'</article>';
   }
-  field.addEventListener('input',render);
-  modalContent.querySelector('#world-close').onclick = () => modalEl.classList.remove('open');
-  render();
-  modalEl.classList.add('open');
+  function render() {
+    const q=normalize(field.value.trim());
+    const matches=[...entities].reverse().filter(e=>(selected==='all'||kind(e)===selected)&&normalize([e.name,e.description,e.location,e.traits,e.form,e.environment,status(e),labels[kind(e)]].join(' ')).includes(q));
+    const ordered=categories.slice(1).flatMap(([id])=>matches.filter(e=>kind(e)===id));
+    const page=ordered.slice(0,visible);
+    list.innerHTML=categories.slice(1).map(([id,title])=>{const group=page.filter(e=>kind(e)===id);return group.length?'<section class="world-group"><h4>'+esc(title)+' · '+matches.filter(e=>kind(e)===id).length+'</h4>'+group.map(card).join('')+'</section>':'';}).join('')||'<p class="world-meta">В этой категории пока нет подходящих записей.</p>';
+    modalContent.querySelector('#world-summary').textContent='Показано '+page.length+' из '+matches.length;
+    more.hidden=page.length>=matches.length; more.style.display=more.hidden?'none':'';
+    tabs.querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.category===selected)));
+  }
+  tabs.addEventListener('click',event=>{const b=event.target.closest('button[data-category]');if(b){selected=b.dataset.category;visible=30;render();}});
+  field.addEventListener('input',()=>{visible=30;render();});
+  more.onclick=()=>{visible+=30;render();};
+  modalContent.querySelector('#world-close').onclick=()=>modalEl.classList.remove('open');
+  render();modalEl.classList.add('open');
+}
+
+function showActiveEffects() {
+  const list=Array.isArray(state?.active_effects)?state.active_effects:[];
+  const names={modifier:'Модификатор проверки',control:'Контроль',schedule:'Отложенный эффект'};
+  const controls={sleep:'Сон',paralysis:'Паралич',hypnosis:'Гипноз',fear:'Страх',restrained:'Ограничение движения',stun:'Оглушение',silence:'Безмолвие',other:'Особое состояние'};
+  const stats={str:'Сила',dex:'Ловкость',con:'Телосложение',int:'Интеллект',wis:'Мудрость',cha:'Харизма'};
+  const targetName=id=>id==='hero'?(state.name||'Герой'):(state.world_entities||[]).find(e=>e.id===id)?.name||'Неизвестная цель';
+  modalContent.innerHTML='<h3>✨ Активные эффекты</h3><p class="world-meta">Длительность измеряется игровым временем.</p>'
+    +(list.map(e=>'<article class="world-entry"><strong>'+esc(e.name||names[e.type]||'Эффект')+'</strong><span class="world-meta">'+esc(targetName(e.target))+' · '+esc(names[e.type]||'Эффект')+'</span>'
+      +(e.type==='modifier'?'<p>'+esc(stats[e.stat]||e.stat)+': '+(e.amount>0?'+':'')+esc(e.amount)+'</p>':'')
+      +(e.control?'<p>'+esc(controls[e.control]||e.control)+'</p>':'')
+      +(Number.isInteger(e.expires)?'<p>До: '+esc(worldTime(e.expires))+'</p>':'')
+      +(Number.isInteger(e.next_tick)?'<p>Следующее срабатывание: '+esc(worldTime(e.next_tick))+' · '+(e.operation==='heal'?'Лечение':'Урон')+' '+esc(e.amount)+' HP · осталось '+esc(e.remaining)+'</p>':'')+'</article>').join('')||'<p>Нет активных эффектов.</p>')
+    +'<button type="button" class="btn" id="effects-close">Закрыть</button>';
+  modalContent.querySelector('#effects-close').onclick=()=>modalEl.classList.remove('open'); modalEl.classList.add('open');
 }
 
 function showAgenda() {
@@ -2270,7 +2317,7 @@ function doHelp() {
     '<code>/cancel-check</code> — отказаться от необязательной проверки<br>' +
     '<code>/sheet</code> — полный лист<br><code>/skills</code> — умения и навыки<br>' +
     '<code>/notes</code> — заметки, письма, документы<br>' +
-    '<code>/world</code> — энциклопедия открытого мира<br>' +
+    '<code>/world</code> — энциклопедия открытого мира<br><code>/effects</code> — активные эффекты<br>' +
     '<code>/wait</code> — время и события. <code>/wait next</code> — до ближайшего события<br>' +
     '<code>/save имя</code> — сохранить<br><code>/load имя</code> — загрузить<br>' +
     '<code>/transfer</code> — перенос партии<br><code>/reset</code> — новая игра<br><br>' +
@@ -2427,6 +2474,7 @@ document.querySelectorAll('#drawer .btn[data-action]').forEach(btn => {
     else if (a === 'sheet') doSheet();
     else if (a === 'wait') showAgenda();
     else if (a === 'world') showWorldCodex();
+    else if (a === 'effects') showActiveEffects();
     else if (a === 'skills') doSkills();
     else if (a === 'notes') doNotes();
     else if (a === 'save') doSave();

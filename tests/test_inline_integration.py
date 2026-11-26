@@ -101,3 +101,34 @@ class InlineIntegrationTest(unittest.TestCase):
         self.assertEqual(state['world_entities'][0]['hp'],20)
         self.assertEqual(updated['hp'],state['hp'])
         self.assertIsNone(updated['pending_check'])
+
+    def test_effects_commit_and_retry(self):
+        import json
+        story='На тебя падает проклятие, лишающее сил.'
+        delta={'effects':[{'type':'damage','target':'hero','amount':3,'evidence':story}], 'hp_delta':-3,'hp_event':story}
+        self.assertEqual(self.stream(story+START+json.dumps(delta,ensure_ascii=False)+END),story+self.m.TURN_COMPLETE)
+        with patch.object(self.m,'_measured_completion',side_effect=AssertionError('Unexpected call')):
+            saved=self.commit(); replay=self.commit()
+        self.assertEqual(saved['state']['hp'],self.m.DEFAULT_STATE['hp']-3)
+        self.assertEqual(saved,replay)
+        self.assertIn('HP',saved['messages'][-1]['resolution'])
+
+    def test_effects_clock_and_signed_damage(self):
+        state={**self.m.DEFAULT_STATE,'race':'Эльф','class':'Маг','world_minute':100,'hp':10,'max_hp':10,
+               'pending_check':{'id':'c','kind':'damage','expr':'1d8','effect':'hero_damage'}}
+        from campaign import roll_result
+        roll=roll_result(state['pending_check'],{'expr':'1d8','rolls':[4],'check_id':'c'})
+        story='Удар наносит четыре единицы урона.'
+        history=[{'role':'user','content':'[[БРОСОК]] 1d8 = 4.'},{'role':'assistant','content':story}]
+        delta={'effects':[{'type':'damage','target':'hero','amount':4,'evidence':story}]}
+        updated=self.m.extract_state(history,state,'test',roll,inline_delta=delta)
+        self.assertEqual(updated['hp'],6)
+        self.assertIn('не применён',updated['effect_log'][0])
+
+    def test_effect_fields_not_overwritten_by_fallback(self):
+        state={**self.m.DEFAULT_STATE,'race':'Эльф','class':'Маг','mana':2,'max_mana':10}
+        history=[{'role':'user','content':'Смотрю.'},{'role':'assistant','content':'Лес тих.'}]
+        result=types.SimpleNamespace(choices=[types.SimpleNamespace(finish_reason='stop',message=types.SimpleNamespace(content='{"mana":999,"active_effects":[{"id":"bad"}],"hero_form":{"form":"bad"}}'))])
+        with patch.object(self.m,'_measured_completion',return_value=result):
+            updated=self.m.extract_state(history,state,'test')
+        self.assertEqual(updated['mana'],2); self.assertEqual(updated['active_effects'],[]); self.assertNotIn('hero_form',updated)

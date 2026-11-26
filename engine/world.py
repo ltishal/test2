@@ -82,8 +82,8 @@ def world_context(state, query, limit=12):
     selected = []
     for e in ranked[:limit]:
         entry = {k: text(e.get(k), n) for k,n in {'id':80,'name':160,'kind':30,'description':260,
-                 'location':180,'traits':160,'status':120,'threat':30}.items() if isinstance(e.get(k),str)}
-        entry.update({k:e[k] for k in ('hp','max_hp') if type(e.get(k)) is int})
+                 'location':180,'traits':160,'status':120,'threat':30,'form':120,'environment':160}.items() if isinstance(e.get(k),str)}
+        entry.update({k:e[k] for k in ('hp','max_hp','mana','max_mana','attitude') if type(e.get(k)) is int})
         size = len(json.dumps(entry,ensure_ascii=False))
         if size <= budget:
             selected.append(entry)

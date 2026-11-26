@@ -214,6 +214,10 @@ def roll_result(check, roll):
     result = {"expr": roll["expr"], "rolls": dice, "kept": kept, "mod": bonus, "total": sum(kept) + bonus}
     if check:
         result["check"] = check
+        effect_bonus = check.get("effect_bonus", 0)
+        if type(effect_bonus) is int and -10 <= effect_bonus <= 10 and effect_bonus:
+            result["effect_bonus"] = effect_bonus
+            result["total"] += effect_bonus
         dc = check.get("dc")
         if type(dc) is int:
             result["success"] = result["total"] >= dc
