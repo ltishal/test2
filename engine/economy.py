@@ -11,11 +11,11 @@ COUNT = r"(?:[1-9][0-9]{0,5}|" + "|".join(WORDS) + ")"
 COIN_PHRASE = re.compile(
     rf"\b({COUNT})\s+(золот\w*|серебрян\w*|медн\w*|зм|см|мм)\b", re.I
 )
-EXCHANGE_INTENT = re.compile(r"размен|обменива|обменя|меняю", re.I)
+EXCHANGE_INTENT = re.compile(r"размен|обмен|меняю|соглашаюсь", re.I)
 PAID_COIN = re.compile(
     r"\b(?:отдаю|передаю|плачу|меняю|размениваю|обмениваю|разменяй(?:те)?)\b[^.;!?]{0,90}", re.I
 )
-EXCHANGE_DONE = re.compile(r"обмен (?:состоялся|заверш[её]н)|разменял[аи]?|"
+EXCHANGE_DONE = re.compile(r"(?:обмен|размен) (?:состоялся|заверш[её]н|выполнен)|разменял[аи]?|"
                            r"\bпринима\w+\b.{1,100}\b(?:отсчитыва\w+|выда[её]т|да[её]т)\b", re.I | re.S)
 
 
@@ -76,7 +76,7 @@ def trade_evidence(proposal, reply, *, quantity=1):
     evidence=proposal['evidence'].casefold().replace('ё','е')
     if not mentions_item(proposal.get('item'), evidence): return False
     if not any(c==proposal.get('currency') and n==proposal.get('price') for c,n in coin_mentions(evidence)): return False
-    if not re.search(r'сто[ия]|цен|прода|куп|отда|покуп|предлага|(?:за|по)\s|[—–:]', evidence): return False
+    if not re.search(r'сто[ия]|цен|прода|куп|отда|покуп|предлага|вручает|протягивает|принимает|получаешь|(?:за|по)\s|[—–:]', evidence): return False
     if re.search(r'\b(?:не прода|не куп|не отда|отказ|если|може[тш])\w*',evidence): return False
     if quantity>1 and stated_stock(evidence) != quantity: return False
     return True
@@ -85,12 +85,12 @@ def trade_evidence(proposal, reply, *, quantity=1):
 STOCK = re.compile(rf"\b({COUNT})\s*(?:шт\.?|штук\w*|единиц\w*|порци\w*|предмет\w*|пайк\w*)", re.I)
 EXPLICIT_QUOTE = re.compile(
     rf"(?:^|[«\"\n]|[:.]\s+)([А-Яа-яЁё0-9][^«»\"\n:.,;—–]{{1,75}}?)\s+"
-    rf"(?:стоит\s+|[—–]\s*)({COUNT})\s+(золот\w*|серебрян\w*|медн\w*|зм|см|мм)\b", re.I
+    rf"(?:стоит\s+|[—–]\s*(?:по\s+)?)({COUNT})\s+(золот\w*|серебрян\w*|медн\w*|зм|см|мм)\b", re.I
 )
 
 
 STOCK_PREFIX = (
-    r'(?:в наличии|у него есть|у не[её] есть|есть|'
+    r'(?:в наличии|у него есть|у не[её] есть|есть|их оказалось|'
     r'остал(?:ся|ось|ись|ась)|оста(?:ётся|ется|ются))'
 )
 DISPLAYED_STOCK = (
@@ -99,12 +99,24 @@ DISPLAYED_STOCK = (
 )
 STOCK_COUNT = rf'(?:{COUNT}|оба|обе)'
 EXPLICIT_STOCK = re.compile(
-    rf'\b(?:{STOCK_PREFIX}|{DISPLAYED_STOCK})\s+({STOCK_COUNT})\b', re.I
+    rf'\b(?:{STOCK_PREFIX}|{DISPLAYED_STOCK}|перед н(?:им|ей)\s+[—–-])\s+({STOCK_COUNT})\b', re.I
 )
 STOCKED_QUOTE = re.compile(
     rf'\b{STOCK_PREFIX}\s+({STOCK_COUNT})\s+([а-яё]+(?:\s+[а-яё]+){{0,3}}?)\s+по\s+'
     rf'({COUNT})\s+(золот\w*|серебрян\w*|медн\w*|зм|см|мм)\b', re.I
 )
+COUNTED_QUOTE = re.compile(
+    rf'\bпересчитыва\w*\s+([а-яё]+(?:\s+[а-яё]+){{0,3}}?)(?=[,.;])'
+    rf'[^.!?]{{0,100}}[.!?]\s+их оказалось\s+{STOCK_COUNT}\s*;'
+    rf'[^.!?]{{0,80}}\bцен(?:а|ой|у)\s*[:—–-]\s*{COUNT}\s+'
+    r'(?:золот\w*|серебрян\w*|медн\w*|зм|см|мм)\s+за (?:штук\w*|кажд\w*)\b', re.I
+)
+HIS_STOCK_QUOTE = re.compile(
+    rf'\bперед н(?:им|ей)\s*[—–-]\s*({STOCK_COUNT})\s+'
+    rf'([а-яё]+(?:\s+[а-яё]+){{0,3}}?),?\s+по\s+{COUNT}\s+'
+    r'(?:золот\w*|серебрян\w*|медн\w*|зм|см|мм)\s+кажд\w*\b', re.I
+)
+
 DISPLAYED_ITEM = re.compile(
     rf'\b{DISPLAYED_STOCK}\s+{STOCK_COUNT}\s+([а-яё]+(?:\s+[а-яё]+){{0,3}}?)'
     r'(?=\s+и называет цену|[,.;!?])', re.I
@@ -115,7 +127,8 @@ UNIT_PRICE = re.compile(
 )
 ADJACENT_STOCK = re.compile(
     r'^[»" ,;]*(?:[.!?]\s*)?(?:(?:торговец|продавец|он|она)\s+подтверждает,?\s+что\s+)?'
-    r'(?:после продажи[^.!?;]{0,42}?\s+)?(?:у него\s+|у не[её]\s+|на прилавке\s+)?'
+    r'(?:(?:он|она)\s+сверяется с полкой и сообщает:\s*)?'
+    r'(?:после продажи[^.!?;]{0,42}?\s+)?(?:у него\s+|у не[её]\s+|на прилавке\s+|в продаже\s+)?'
     rf'{STOCK_PREFIX}\s+{STOCK_COUNT}\b([^.!?;»"]{{0,45}})', re.I
 )
 
@@ -159,7 +172,9 @@ def offers_from_story(reply, action=""):
         currency, amount = price[0]
         quotes.append({"item": name, "currency": currency, "price": amount, "stock": stock or 1,
                        "stock_explicit": stock is not None, "evidence": evidence})
-    stocked = [(match[2], match[0]) for match in STOCKED_QUOTE.finditer(clean)]
+    stocked = [(match[2], match[0]) for pattern in (STOCKED_QUOTE, HIS_STOCK_QUOTE)
+               for match in pattern.finditer(clean)]
+    stocked.extend((match[1], match[0]) for match in COUNTED_QUOTE.finditer(clean))
     for match in DISPLAYED_ITEM.finditer(clean):
         tail = clean[match.end():match.end()+185]
         unit_price = UNIT_PRICE.search(tail)
@@ -173,6 +188,8 @@ def offers_from_story(reply, action=""):
         price = coin_mentions(evidence)
         if price:
             currency, amount = price[-1]
+            if trade_key(name) in ('пайки', 'пайков', 'пайка'):
+                name = 'Паёк'
             quotes.append({"item": name, "currency": currency, "price": amount,
                            "stock": stated_stock(evidence), "stock_explicit": True,
                            "evidence": evidence})
@@ -187,7 +204,7 @@ PURCHASE_CANCELLED = re.compile(
 PURCHASE_COMPLETE = re.compile(
     r'\b(?:покупк\w* состоял\w*|сделка состоял\w*|покупа(?:ешь|ет|ю)|'
     r'купил[аи]?|отда(?:л[аи]?|[её]шь|[её]т)|переда(?:л[аи]?|[её]шь|[её]т)|'
-    r'оплатил[аи]?|продал[аи]?|принима\w* монет\w*|платишь|забираешь|получаешь|'
+    r'оплатил[аи]?|продал[аи]?|покупка заверш[её]на|принима\w* монет\w*|платишь|забираешь|получаешь|'
     r'бер[её]шь|отсчитываешь|вручает|протягивает|переходит к тебе)\b', re.I
 )
 
@@ -274,7 +291,8 @@ def coin_mentions(content):
 
 def exchange_from_story(action, reply):
     """Old prose-only turns still settle an explicit, confirmed two-coin exchange."""
-    if not EXCHANGE_INTENT.search(action) or not EXCHANGE_DONE.search(reply):
+    if (not EXCHANGE_INTENT.search(action) or not EXCHANGE_DONE.search(reply)
+            or re.search(r'\b(?:если|может|готов|пока не|не состоялся)\b', reply, re.I)):
         return None
     expressed = PAID_COIN.search(action)
     if not expressed or re.search(r"\bне\s*$", action[:expressed.start()], re.I):

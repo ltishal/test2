@@ -7,7 +7,7 @@ from uuid import uuid4
 
 ROLL_COMMAND = re.compile(r"/roll\s+((?:\d*)d\d+(?:k[hl]\d+)?(?:[+-]\d+)?)", re.I)
 DICE_PARTS = re.compile(r"(\d*)d(\d+)(?:(k[hl])(\d+))?([+-]\d+)?", re.I)
-DIFFICULTY = re.compile(r"(?:\bDC|КД|КЗ)\s*[*: ]*(\d+)", re.I)
+DIFFICULTY = re.compile(r"(?:\bDC|КД|КЗ|КБ)\s*[*: ]*(\d+)", re.I)
 KINDS = {"check", "attack", "save", "damage", "heal", "initiative"}
 SCENE_FIELDS = ("id", "location", "time", "participants", "goal", "situation")
 FACT_FIELDS = ("id", "subject", "detail", "source", "holder", "status")
@@ -171,6 +171,13 @@ def check_instructions_in_card(reply, check):
     commands = list(ROLL_COMMAND.finditer(reply))
     if not commands or any(formula_key(match[1]) != formula_key(check.get("announced_expr", check["expr"])) for match in commands):
         return reply
+    if (check.get("ammo") or check.get("actor_id")) and type(check.get("dc")) is int:
+        # The card carries the resolved formula and DC. Keep mechanical
+        # numbers mentioned in prose consistent with that card.
+        reply = re.sub(r"(\*\*|`)(" + ROLL_COMMAND.pattern + r")\s*,?\s*"
+                       + DIFFICULTY.pattern + r"(?:\*\*|`)", "", reply, flags=re.I)
+        reply = DIFFICULTY.sub(lambda match: match[0][:match.start(1) - match.start()] + str(check["dc"]), reply)
+        reply = re.sub(r":\s*\.(?=\s|$)", ".", reply)
     return re.sub(
         r"(?:\*\*|\x60)*(?:команда\s*:\s*)?(?:\*\*|\x60)*"
         + ROLL_COMMAND.pattern + r"(?:\*\*|\x60)*(?:\.(?:\*\*|\x60)*)?",

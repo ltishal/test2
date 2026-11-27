@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Расход токенов · RPG ИИ-Мастер</title>
+<style>
+  :root { color-scheme: dark; font: 16px system-ui, sans-serif; background: #141210; color: #eee6da; }
+  body { max-width: 1060px; margin: auto; padding: clamp(20px, 4vw, 48px); }
+  h1 { margin: 0; color: #efcd85; font: 700 clamp(26px, 4vw, 40px) Georgia, serif; }
+  p { color: #bfb4a5; line-height: 1.5; }
+  .table-wrap { overflow: auto; border: 1px solid #463b30; border-radius: 12px; background: #1e1a16; }
+  table { width: 100%; border-collapse: collapse; text-align: left; font-variant-numeric: tabular-nums; }
+  th, td { padding: 13px 16px; border-bottom: 1px solid #463b30; vertical-align: top; }
+  th { color: #bfb4a5; font-size: 13px; }
+  tbody tr:last-child td { border-bottom: 0; }
+  .number { text-align: right; white-space: nowrap; }
+  .missing { display: block; margin-top: 4px; color: #efcd85; font-size: 12px; }
+  time { white-space: nowrap; }
+  summary { cursor: pointer; width: fit-content; }
+  ul { padding-left: 18px; font-size: 13px; color: #bfb4a5; min-width: 180px; }
+  li + li { margin-top: 6px; }
+  nav { margin-top: 18px; display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  a { color: #efcd85; }
+</style>
+</head>
+<body>
+  <main>
+    <h1>Расход токенов за ход</h1>
+    <p>Один ход может включать ответ мастера, обновление листа и свёртку истории. Итог учитывает все вызовы, по которым провайдер вернул данные.</p>
+    {% set labels = {"chat": "Ответ мастера", "state": "Обновление листа", "summary": "Свёртка истории"} %}
+    {% if turns %}
+    <div class="table-wrap" role="region" aria-label="Таблица расхода токенов" tabindex="0">
+      <table>
+        <thead>
+          <tr><th scope="col">Ход · UTC</th><th scope="col" class="number">Вход</th><th scope="col" class="number">Выход</th><th scope="col" class="number">Всего</th><th scope="col">Запросы к модели</th></tr>
+        </thead>
+        <tbody>
+        {% for turn in turns %}
+          {% set has_usage = turn.missing < turn.calls | length %}
+          <tr>
+            <td><time>{{ turn.date }}</time></td>
+            <td class="number">{{ turn.input if has_usage else '—' }}</td>
+            <td class="number">{{ turn.output if has_usage else '—' }}</td>
+            <td class="number">
+              <strong>{{ turn.total if has_usage else '—' }}</strong>
+              {% if turn.missing %}<span class="missing">Без данных&nbsp;({{ turn.missing }})</span>{% endif %}
+            </td>
+            <td>
+              <details>
+                <summary>Показать ({{ turn.calls | length }})</summary>
+                <ul>
+                  {% for call in turn.calls %}
+                  <li>{{ labels[call.stage] }} · {{ call.model }}<br>
+                    {% if call.total_tokens is none %}Расход неизвестен{% else %}{{ call.input_tokens }} вх. + {{ call.output_tokens }} вых. · {{ call.total_tokens }} всего{% endif %}
+                  </li>
+                  {% endfor %}
+                </ul>
+              </details>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+      <p>На этой странице пока нет записей.</p>
+    {% endif %}
+    {% if page > 1 or more %}
+      <nav aria-label="Страницы статистики">
+        {% if page > 1 %}<a href="?page={{ page - 1 }}">Более новые</a>{% endif %}
+        <span>Страница {{ page }}</span>
+        {% if more %}<a href="?page={{ page + 1 }}">Более ранние</a>{% endif %}
+      </nav>
+    {% endif %}
+  </main>
+</body>
+</html>

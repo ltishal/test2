@@ -187,7 +187,12 @@ def merge_entities(state, proposals, reply):
                 entity['access'] = 'closed'
             elif key(entity.get('status')) == 'open':
                 entity['access'] = 'open'
-    for entity in result: sync_life(entity)
+    for entity in result:
+        sync_life(entity)
+        if (entity.get('kind') == 'creature' and not entity.get('threat')
+                and re.search(r'\bучебн\w* (?:существ\w*|голем\w*|конструкт\w*|манекен\w*|мишен\w*)',
+                              text(entity.get('description'), 600), re.I)):
+            combat_ready(entity, 'minor')
     return result
 
 
@@ -196,6 +201,7 @@ NPC_ROLES = {
     'торговец': 'торговец', 'купец': 'торговец', 'страж': 'страж',
     'стражник': 'страж', 'сторож': 'сторож', 'наниматель': 'наниматель',
     'спутник': 'спутник', 'проводник': 'проводник', 'дворф': 'дворф', 'возница': 'возница',
+    'архивист': 'архивист', 'архивистка': 'архивист',
 }
 ROLE_WORD = r"(?i:" + '|'.join(NPC_ROLES) + r")"
 ROLE_NAME = re.compile(rf"\b({ROLE_WORD})(?:-{ROLE_WORD})?\s+({PERSON_NAME})\b")

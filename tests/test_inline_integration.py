@@ -447,6 +447,98 @@ class InlineIntegrationTest(unittest.TestCase):
             self.assertEqual([npc['hp'] for npc in second['world_entities']], [0, 8, 6])
             self.assertEqual(second['xp'], 25)
 
+    def test_alpha51_spoken_formula_is_attached_to_learned_card(self):
+        from engine.combat import hero_ability
+        state = {**self.m.DEFAULT_STATE, 'name': 'Руна', 'race': 'человек', 'class': 'маг',
+                 'hp': 12, 'max_hp': 12}
+        reply = ('Лея диктует: «Запиши так: **1d4 урона холодом, одна мана, перезарядка один раунд**». '
+                 'Ты переписываешь формулу. Лея проверяет запись: «Теперь ты знаешь “Искру тумана”». '
+                 'Урок завершён. Заклинание изучено, но в этом ходу не использовано.')
+        history = [{'role': 'user', 'content': 'Завершаю урок.'}, {'role': 'assistant', 'content': reply}]
+        updated = self.m.extract_state(history, state, inline_delta={'abilities': [
+            {'name': 'Искра тумана', 'description': '1d4 холодом', 'recharge': 'unlimited'}]})
+        move = hero_ability(updated, 'Искра тумана')
+        self.assertEqual((move['element'], move['cost'], move['cooldown'], updated['hp']), ('cold', 1, 1, 12))
+        history[-1]['content'] = reply.replace('Урок завершён. Заклинание изучено', 'Урок не завершён. Заклинание не изучено')
+        incomplete = self.m.extract_state(history, state, inline_delta={})
+        self.assertEqual(incomplete['abilities'], [])
+
+    def test_alpha51_fire_without_retrieval_and_rest_recap(self):
+        state = {**self.m.DEFAULT_STATE, 'name': 'Руна', 'race': 'человек', 'class': 'маг',
+                 'hp': 17, 'max_hp': 24, 'inventory': [
+                     'длинный лук', {'id': 'arrows', 'name': 'обычные стрелы', 'quantity': 20}]}
+        history = [{'role': 'user', 'content': 'Беру длинный лук и выпускаю одну стрелу по мишени. Стрелу не подбираю.'},
+                   {'role': 'assistant', 'content': 'Ты выпускаешь стрелу в мишень. Стрела врезается в манекен.'}]
+        updated = self.m.extract_state(history, state, inline_delta={})
+        self.assertEqual(updated['inventory'][1]['quantity'], 19)
+        self.assertEqual(self.m._synchronize_recap('В инвентаре осталось 18 обычных стрел.', updated,
+                                                   {'check': {'ammo': 'arrow'}}),
+                         'В инвентаре осталось 19 обычных стрел.')
+        reply = 'Восемь часов спустя отдых завершён. Текущие HP по листу: **17 из 24**.'
+        history[-2]['content'] = 'Устраиваю долгий отдых и сплю восемь часов.'
+        history[-1]['content'] = reply
+        rested = self.m.extract_state(history, {**updated, 'world_minute': 60}, inline_delta={})
+        self.assertEqual((rested['world_minute'], rested['hp']), (540, 24))
+        self.assertIn('**24/24**', self.m._synchronize_recap(reply, rested, None))
+
+    def test_alpha51_named_npc_attack_against_armor_binds_and_resolves(self):
+        from campaign import roll_result, rules_result
+        state = {**self.m.DEFAULT_STATE, 'name': 'Кочка', 'race': 'дворф', 'class': 'следопыт',
+                 'hp': 13, 'max_hp': 24, 'armor_equipped': 'кожаный доспех', 'stats': {'dex': 16},
+                 'scene': {'location': 'Тропа'}, 'world_entities': [
+                     {'id': 'forest', 'name': 'Гоблин у леса', 'kind': 'creature',
+                      'location': 'Тропа', 'hp': 8, 'max_hp': 8, 'threat': 'minor'}]}
+        history = [{'role': 'user', 'content': 'Говорю с Сильдаром.'},
+                   {'role': 'assistant', 'content': 'Гоблин у леса бросается ближе и атакует Кочку. '
+                                                     'Бросок атаки: 1d20+2 против КБ 13. Команда: /roll 1d20+2'}]
+        next_state = self.m.extract_state(history, state, inline_delta={})
+        check = next_state['pending_check']
+        self.assertEqual((check['kind'], check['actor_id'], check['dc']), ('attack', 'forest', 14))
+        result = roll_result(check, {'expr': '1d20+2', 'rolls': [17], 'check_id': check['id'],
+                                     'npc_attack_damage': 3})
+        self.assertEqual(rules_result(next_state, result)['hp_after'], 10)
+
+    def test_alpha51_exchange_accepts_formatted_settlement_and_empty_shop(self):
+        state = {**self.m.DEFAULT_STATE, 'name': 'Кочка', 'race': 'дворф', 'class': 'следопыт',
+                 'silver': 5, 'scene': {'location': 'Застава'}, 'shop_offers': [
+                     {'offer_id': 'ration', 'location': 'Застава', 'item': 'паёк', 'stock': 0,
+                      'currency': 'silver', 'price': 5}
+                 ]}
+        direct, _ = self.m._engine_command(state, '/exchange silver 1 copper', None)
+        self.assertEqual((direct['silver'], direct['copper']), (4, 10))
+        action = 'Соглашаюсь. Отдаю ровно одну серебряную монету, получаю ровно десять медных.'
+        reply = 'Торговец принимает **одну серебряную** и отсчитывает **десять медных**. Размен состоялся.'
+        history = [{'role': 'user', 'content': action}, {'role': 'assistant', 'content': reply}]
+        for evidence in ('Торговец принимает одну серебряную и отсчитывает десять медных.', 'Размен завершён.'):
+            with self.subTest(evidence=evidence):
+                updated = self.m.extract_state(history, state, inline_delta={
+                    'exchange': {'from': 'silver', 'to': 'copper', 'amount': 1, 'evidence': evidence}})
+                self.assertEqual((updated['silver'], updated['copper']), (4, 10))
+        history[-1]['content'] = 'Торговец готов отсчитать десять медных.'
+        self.assertEqual(self.m.extract_state(history, state, inline_delta={})['silver'], 5)
+
+    def test_alpha51_sealed_letter_survives_handout_and_goes_to_named_guard(self):
+        state = {**self.m.DEFAULT_STATE, 'name': 'Ива', 'race': 'человек', 'class': 'маг',
+                 'scene': {'location': 'Портовый архив'}, 'inventory': []}
+        opening = 'Страж Орен несёт караул; торговец Орен держит прилавок. Архивистка Дара хранит письмо.'
+        state = self.m.extract_state([{'role': 'user', 'content': 'Осматриваюсь.'},
+                                     {'role': 'assistant', 'content': opening}], state, inline_delta={})
+        self.assertEqual(len([npc for npc in state['world_entities'] if npc['name'] == 'Орен']), 2)
+        self.assertIn('Дара', [npc['name'] for npc in state['world_entities']])
+        action = 'Прошу дать запечатанное письмо. Принимаю его, если Дара согласна.'
+        reply = 'Затем протягивает запечатанный конверт. Печать цела; теперь письмо у тебя.'
+        history = [{'role': 'user', 'content': action}, {'role': 'assistant', 'content': reply}]
+        received = self.m.extract_state(history, state, inline_delta={})
+        self.assertEqual(len(received['inventory']), 1)
+        self.assertEqual(self.m.extract_state(history, received, inline_delta={})['inventory'], received['inventory'])
+        history = [{'role': 'user', 'content': 'Передаю стражу запечатанное письмо от Дары.'},
+                   {'role': 'assistant', 'content': 'Страж Орен принимает запечатанный конверт и проверяет печать.'}]
+        delivered = self.m.extract_state(history, received, inline_delta={})
+        self.assertEqual(delivered['inventory'], [])
+        self.assertIn('Страж Орен', [fact.get('holder') for fact in delivered['facts']])
+        history[-1]['content'] = 'Страж Орен отказывается, письмо остаётся у тебя.'
+        self.assertEqual(self.m.extract_state(history, received, inline_delta={})['inventory'], received['inventory'])
+
     def test_save_name_preserves_cyrillic_and_never_includes_path_separators(self):
         self.assertEqual(self.m._safe_name('Тест Alpha 2.1 — Лея'), 'Тест Alpha 2.1 — Лея')
         self.assertEqual(self.m._safe_name('../..'), '')

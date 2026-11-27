@@ -3,7 +3,7 @@ from copy import deepcopy
 from random import randint
 import re
 
-from campaign import ability_key, apply_ability_event, formula_key, pending_check
+from campaign import ROLL_COMMAND, ability_key, apply_ability_event, formula_key, pending_check
 from engine.effects import change_pool, effect_context, check_bonus, hero_incapacitated
 from engine.clock import advance_action
 from engine.equipment import equipped, item_spec, require_ammo, consume_ammo, WEAPONS, ARMOR
@@ -126,7 +126,9 @@ def find_combatant(state, ref):
     return matches[0]
 
 
-def narrated_attacker(entities, proposal, reply):
+def narrated_attacker(entities, proposal, reply, *, hero_name=None, location=None):
+    if location:
+        entities = [entry for entry in entities if key(entry.get("location")) in ("", key(location))]
     candidate = proposal.get("actor_id") if isinstance(proposal, dict) else None
     if isinstance(candidate, str):
         npc = next((entry for entry in entities if entry["id"] == candidate
@@ -135,7 +137,27 @@ def narrated_attacker(entities, proposal, reply):
             return npc
     announced = re.search(r"\bбросок\s+за\s+[«„\"*]*(\w+(?:-\w+)?)", reply, re.I)
     if not announced:
-        return None
+        command = ROLL_COMMAND.search(reply)
+        if not command:
+            return None
+        nearby = re.sub(r'[*_`]', '', reply[max(0, command.start() - 400):command.start()])
+        named_hero = key(hero_name)
+        hero = re.escape(named_hero[:-1] if named_hero.endswith(("а", "я")) else named_hero)
+        recipient = r"(?:тебя|героя"
+        if hero:
+            recipient += rf"|{hero}\w{{0,2}}"
+        recipient += ")"
+        matches = []
+        for entity in entities:
+            if entity.get("kind") not in ("npc", "creature") or not is_present(entity):
+                continue
+            for name in entity_names(entity):
+                pattern = (rf"\b{re.escape(key(name))}\b[^.!?;]{{0,65}}?"
+                           rf"\bатакует\s+{recipient}\b")
+                if re.search(pattern, nearby.casefold().replace("ё", "е")):
+                    matches.append(entity)
+                    break
+        return matches[0] if len(matches) == 1 else None
     reference = key(announced[1])
     matches = []
     for npc in entities:
@@ -318,7 +340,12 @@ SHOT_EVENT = re.compile(
 
 
 def narrated_weapon(state, action):
-    if not SHOT_INTENT.search(action) or re.search(r'\b(?:если|не|собираюсь)\b', action, re.I):
+    for clause in re.split(r'[.!?;\n]', action):
+        shot = SHOT_INTENT.search(clause)
+        if shot and not re.search(r'\b(?:если|собираюсь|хочу)\b|\bне\s+(?:буду\s+)?$', clause[:shot.start()], re.I):
+            action = clause
+            break
+    else:
         return None
     candidates = []
     for item in state.get('inventory', []):
@@ -345,6 +372,24 @@ def bind_ranged_weapon(state, check, weapon):
     check.update(announced_expr=check['expr'], expr=f'1d20{2 + hero_stat(state, stat):+}',
                  stat=stat, effect_bonus=check_bonus(state, stat), ammo=weapon['ammo'])
     return check
+
+
+def shot_cover(reply, target_name=""):
+    """Recognize an explicit defense adjustment for the announced shot."""
+    clean = re.sub(r'[*_`]', '', reply)
+    adjustments = []
+    for clause in re.split(r'[.!?;\n]', clean):
+        normalized = key(clause)
+        if re.search(r'\b(?:если|возможно|без укрытия)\b', clause, re.I):
+            continue
+        refers_to_target = re.search(r'\b(?:цел[ьи]|целям|противник\w*|ему|ей|его|е[её])\b', normalized)
+        if not refers_to_target and (not target_name or key(target_name) not in normalized):
+            continue
+        if re.search(r'три четверти.*укрыти|укрыти\w* (?:на )?три четверти', clause, re.I):
+            adjustments.append(5)
+        elif re.search(r'половинн\w* укрыти|частичн\w* укрыти', clause, re.I):
+            adjustments.append(2)
+    return max(adjustments, default=0)
 
 
 def narrated_ranged_check(state, weapon, action, reply, proposal):
@@ -379,7 +424,7 @@ def narrated_ranged_check(state, weapon, action, reply, proposal):
     target, = targets
     spec = profile(target)
     check = pending_check(reply, {'kind': 'attack', 'title': 'Выстрел', 'target': target['name']},
-                          scene, defense_dc=spec['defense'])
+                          scene, defense_dc=spec['defense'] + shot_cover(reply, target['name']))
     if not check or formula_key(check["expr"])[1] != 20:
         return None
     combat_ready(target, 'normal')

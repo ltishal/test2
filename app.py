@@ -52,13 +52,13 @@ from engine.effects import (EFFECT_PROMPT, PASSIVE_OBSERVATION, resolve_effects,
 from engine.combat import (ARMOR, COMBAT_PROMPT, WEAPONS, combat_context, combat_status, combat_turn, hero_defense, narrated_attacker,
                            profile, safe_ability, narrated_weapon, narrated_ranged_check, bind_ranged_weapon, adjust_damage, SHOT_EVENT)
 from engine.economy import (TRADE_PROMPT, COINS, apply_exchange, apply_purchase, current_offers,
-                            confirmed_purchase, exchange_from_story, merge_offers, trade_key, wallet_text, settle_offer, PURCHASE_CANCELLED, item_key, same_item)
+                            confirmed_purchase, exchange_from_story, merge_offers, trade_key, wallet_text, settle_offer, PURCHASE_CANCELLED, item_key, same_item, grounded as trade_grounded)
 
 from party_store import PartyConflict, PartyMissing, PartyStore
 from token_usage import TokenUsage, state_turn_id
 
 BASE_DIR = Path(__file__).resolve().parent
-APP_REVISION = "2026-11-27.world-alpha5"
+APP_REVISION = "2026-11-27.world-alpha5.1"
 QWEN_SUMMARY_LIMIT = 480
 QWEN_STATE_LIMIT = 1100
 QWEN_STATE_SETUP_LIMIT = 2200
@@ -485,7 +485,7 @@ def _client_id():
 SYSTEM_PROMPT = """
 Ты — ИИ-мастер текстовой RPG в жанре тёмного фэнтези, D&D и LitRPG. Веди связное приключение на естественном русском. Управляй миром, NPC и последствиями. Решения, мысли и реплики героя оставляй игроку.
 
-Показывай результат действия и двигай сцену. После провала дай последствие или новый путь вместо повторения той же проверки. Доводи установленные цели до развязки. Не добавляй новую обязательную цель задним числом. Различай подтверждённые факты и догадки. Лист отражает состояние после предыдущего ответа. Используй его числа как старт хода. Уже проведённые удары, лечение, покупки и награды не применяй повторно, даже при уточнении. На вопрос о текущем числе ответь числом из листа, если в этом ходу оно не изменилось. Примеры развития сцены: реакция NPC, зацепка, опасность или новый путь. Одна-две яркие детали сильнее перечня эпитетов. Не пересказывай ход игрока, не нагромождай образы и не повторяй одинаковые детали в соседних сценах. Длину и структуру ответа задаёт блок [ФОРМАТ ОТВЕТА].
+Показывай результат действия и двигай сцену. Для боевого раунда из combat используй уже сохранённый номер раунда; не объявляй новый раунд или пропуск хода только из-за разговора либо наблюдения. После провала дай последствие или новый путь вместо повторения той же проверки. Доводи установленные цели до развязки. Не добавляй новую обязательную цель задним числом. Различай подтверждённые факты и догадки. Сохраняй подтверждённого владельца физической улики, пока в текущей сцене явно не произошла передача. Просьба сделать копию не переносит оригинал к другому NPC и не раскрывает содержание запечатанного письма. Если нужен доступ к оригиналу, скажи, чего не хватает. Лист отражает состояние после предыдущего ответа. Используй его числа как старт хода. Уже проведённые удары, лечение, покупки и награды не применяй повторно, даже при уточнении. На вопрос о текущем числе ответь числом из листа, если в этом ходу оно не изменилось. Примеры развития сцены: реакция NPC, зацепка, опасность или новый путь. Одна-две яркие детали сильнее перечня эпитетов. Не пересказывай ход игрока, не нагромождай образы и не повторяй одинаковые детали в соседних сценах. Длину и структуру ответа задаёт блок [ФОРМАТ ОТВЕТА].
 Поддерживай канон по листу и памяти. Сохраняй имена, место, условия и награду каждого принятого или предложенного задания. При закрытии сверяй исходные этапы, включая обратную доставку или доклад. Успех части задачи оставляет остальные этапы открытыми. Не смешивай людей и улики из разных мест. Свежие реплики уточняют старое резюме. У важных NPC свои мотивы, тайны и голос. Мир меняется и без героя: держи 1–4 силы с часами 1–6, продвигай их после крупных сцен и показывай последствия через события.
 
 ПРОВЕРКИ И СЛОЖНОСТЬ (DC)
@@ -1133,6 +1133,46 @@ def _inventory_with_ids(items):
     return result
 
 
+SEALED_LETTER = re.compile(r'\bзапечатанн\w*\s+(?:конверт\w*|письм\w*)\b', re.I)
+LETTER_RECEIVED = re.compile(
+    r'\b(?:протягивает|вручает|переда[её]т)\s+(?:тебе\s+)?' + SEALED_LETTER.pattern, re.I
+)
+LETTER_RECIPIENT = re.compile(
+    r'\b((?:(?i:страж|стражник|торговец|архивистка)\s+)?[А-ЯЁ][а-яё-]{2,30})\s+'
+    r'(?i:принимает|бер[её]т)\s+(?:у тебя\s+)?' + SEALED_LETTER.pattern
+)
+
+
+def narrated_letter_transfer(items, action, latest):
+    if not re.search(r"\b(?:передаю|вручаю|отдаю)\b", action, re.I) or not re.search(r"письм|конверт", action, re.I):
+        return None
+    if re.search(r"\bне\s+(?:передаю|вручаю|отдаю)\b", action, re.I):
+        return None
+    match = LETTER_RECIPIENT.search(latest)
+    if not match or re.search(r"\b(?:если|может|не)\b", re.split(r"[.!?;\n]", latest[:match.start()])[-1], re.I):
+        return None
+    letters = [item for item in items if SEALED_LETTER.search(_item_name(item))]
+    if len(letters) == 1:
+        return {"id": letters[0]["id"], "quantity": 1, "holder": match[1], "evidence": match[0]}
+    return None
+
+
+def receives_sealed_letter(action, latest):
+    if not re.search(r"\b(?:прошу|принимаю|беру)\b", action, re.I) or not re.search(r"письм|конверт", action, re.I):
+        return False
+    if re.search(r"\bне\s+(?:беру|принимаю)\b", action, re.I):
+        return False
+    match = LETTER_RECEIVED.search(latest)
+    if not match:
+        return False
+    prefix = re.split(r"[.!?;\n]", latest[:match.start()])[-1]
+    if re.search(r"\b(?:если|может|не)\b", prefix, re.I):
+        return False
+    return " тебе " in match[0].casefold() or bool(
+        re.search(r"\b(?:письмо|конверт)\s+у тебя\b", latest[match.end():match.end() + 100], re.I)
+    )
+
+
 def _transfer_items(items, transfers, latest):
     owners = []
     applied = set()
@@ -1394,7 +1434,7 @@ def _engine_command(state, query, check):
         offer = matches[0]
         reply = settle_offer(updated,offer,quantity)
         return advance_action(updated,60), reply
-    if not offers:
+    if not current_offers(state, include_sold_out=True):
         raise ValueError("Сначала уточните у торговца цену, чтобы подтвердить торговлю в этой локации.")
     parts = argument.split()
     if len(parts) != 3 or not re.fullmatch(r"[1-9][0-9]{0,5}", parts[1]):
@@ -1650,7 +1690,8 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
     ranged_check = narrated_ranged_check(
         {**current, "world_entities": entities, "scene": campaign_scene},
         shot_weapon, action, latest, proposed)
-    attacker = narrated_attacker(entities, proposed, latest)
+    attacker = narrated_attacker(entities, proposed, latest, hero_name=current.get("name"),
+                                 location=campaign_scene.get("location"))
     if ranged_check:
         next_check = ranged_check
     elif attacker and (not proposed or isinstance(proposed, dict) and proposed.get("kind") in (None, "attack")):
@@ -1752,6 +1793,14 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
             current["mana"] = current["max_mana"]
 
     transfers = new_state.pop("item_transfers", None)
+    if not new_character:
+        items = _inventory_with_ids(current.get("inventory"))
+        fallback = narrated_letter_transfer(items, action, latest)
+        if fallback:
+            transfers = transfers if isinstance(transfers, list) else []
+            if not any(isinstance(event, dict) and event.get("id") == fallback["id"]
+                       and _grounded_event(event.get("evidence"), latest) for event in transfers):
+                transfers = [*transfers, fallback]
     owned_ammo = resolved_ammo or (shot_weapon or {}).get("ammo")
     ammo_log = []
     if resolved_ammo or (shot_weapon and not next_check and SHOT_EVENT.search(latest)
@@ -1792,8 +1841,10 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
             for field in COINS:
                 new_state.pop(field, None)
             try:
-                if structured_exchange and (not isinstance(exchange, dict) or not _grounded_event(exchange.get("evidence"), latest)):
-                    raise ValueError("Размен не удалось подтвердить по этому ходу.")
+                if structured_exchange and not trade_grounded(exchange, latest):
+                    exchange = exchange_from_story(action, latest)
+                    if not exchange:
+                        raise ValueError("Размен не удалось подтвердить по этому ходу.")
                 trade_log.append(apply_exchange(current, exchange))
             except (ValueError, TypeError, AttributeError) as exc:
                 trade_log.append(f"Отклонено: {exc}")
@@ -1847,6 +1898,12 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
     inventory = current.get("inventory")
     if isinstance(inventory, list):
         current["inventory"] = _remove_inventory_items(inventory, new_state.get("inventory_remove"))
+        proposed_items = new_state.get("inventory")
+        proposed_items = proposed_items if isinstance(proposed_items, list) else []
+        if not new_character and receives_sealed_letter(action, latest) and not any(
+                SEALED_LETTER.search(_item_name(item))
+                for item in [*current["inventory"], *proposed_items]):
+            current["inventory"].extend(_inventory_with_ids(["Запечатанное письмо"]))
     merged = dict(current)
     merged["pending_check"] = next_check
     for k, v in new_state.items():
@@ -2795,6 +2852,26 @@ def api_chat():
     )
 
 
+def _synchronize_recap(content, state, roll):
+    check = (roll or {}).get("check") or {}
+    hp = state.get("hp")
+    maximum = state.get("max_hp")
+    if type(hp) is int and type(maximum) is int:
+        content = re.sub(
+            r"(\b(?:текущие HP(?: по листу)?|текущее здоровье|HP)\s*:\s*\*{0,2})"
+            r"\d+\s*(?:/|из)\s*\d+",
+            lambda match: f"{match[1]}{hp}/{maximum}", content, flags=re.I,
+        )
+    if check.get("ammo"):
+        kind = check["ammo"]
+        noun = r"стрел(?:а|ы|у)?" if kind == "arrow" else r"болт(?:а|ы|ов)?"
+        content = re.sub(
+            rf"(\bв инвентаре осталось\s*\*{{0,2}})\d+(?=\s+(?:обычн\w*\s+)?{noun}\b)",
+            lambda match: f"{match[1]}{ammo_available(state, kind)}", content, flags=re.I,
+        )
+    return content
+
+
 def _commit_party_turn(data):
     owner = _owner()
     party_id = _request_id(data["party_id"])
@@ -2841,6 +2918,8 @@ def _commit_party_turn(data):
         details.append(clock_label(new_minute))
     if new_minute is not None and state.get("race") and state.get("class"):
         reply["content"] = synchronize_clock(reply["content"], new_minute)
+    if state.get("race") and state.get("class"):
+        reply["content"] = _synchronize_recap(reply["content"], updated, roll)
     next_check = updated.get("pending_check")
     prior_check = active_check(state, party["messages"])
     effect_log = updated.get("effect_log") or []

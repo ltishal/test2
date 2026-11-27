@@ -92,8 +92,9 @@ def apply_blueprints(state, proposals, reply):
             continue
         try:
             recipe = validate_blueprint(proposal, level)
-            quoted = re.findall(r'[«"]([^»"\n]{3,100})[»"]', evidence)
-            if key(recipe['name']) not in key(evidence) and not any(names_match(recipe['name'], name) for name in quoted):
+            quoted = re.findall(r'[«“"]([^«“»”"\n]{3,100})[»”"]', evidence)
+            normalized = " ".join(evidence.casefold().replace("ё", "е").split())
+            if key(recipe['name']) not in normalized and not any(names_match(recipe['name'], name) for name in quoted):
                 raise ValueError('Название проекта отсутствует в подтверждённой фразе.')
             existing = next((entry for entry in catalog if entry['kind'] == recipe['kind']
                              and names_match(entry['name'], recipe['name'])), None)
@@ -170,6 +171,26 @@ def attach_item_blueprints(state):
     state['inventory'] = changed
 
 
+def narrated_spell_mechanics(value):
+    clean = re.sub(r'[*_`]', '', value)
+    formulae = re.findall(r'\b([1-6]d[0-9]{1,2}(?:[+-][0-9]{1,2})?)\s+(?:урона\s+)?([а-яё]+)', clean, re.I)
+    costs = re.findall(rf'\b({NUMBER_TEXT})\s+(?:единиц\w*\s+)?ман[ыуа]\b', clean, re.I)
+    if len(set(formulae)) != 1 or len(set(costs)) != 1:
+        return None
+    dice, damage = formulae[0]
+    element = next((kind for stem, kind in ELEMENT_NAMES.items() if damage.casefold().startswith(stem)), None)
+    if not element:
+        return None
+    cooldown = re.search(rf'\b(?:восстановление|перезарядка|перезаряжается за)\s*[:—–-]?\s*({NUMBER_TEXT})\s+раунд', clean, re.I)
+
+    def parse_count(value):
+        value = value.casefold()
+        return int(value) if value.isdigit() else NUMBER_WORDS[value]
+
+    return {'dice': dice, 'element': element, 'cost': parse_count(costs[0]),
+            'cooldown': parse_count(cooldown[1]) if cooldown else 0}
+
+
 def learned_spell_from_story(reply, hero_name=None):
     """Recover a completed lesson with an explicit hero, formula and cost."""
     heroes = ['ты']
@@ -183,23 +204,27 @@ def learned_spell_from_story(reply, hero_name=None):
         if not subject.match(prefix) or re.search(r'\b(?:не|если|бы|мож\w*|говор\w*|сказ\w*)\b', prefix, re.I):
             continue
         tail = re.split(r'[.!?\n]', reply[match.end():match.end()+220].lstrip(' :—–'), 1)[0]
-        tail = re.sub(r'[*_`]', '', tail)
-        dice = re.search(r'\b([1-6]d[0-9]{1,2}(?:[+-][0-9]{1,2})?)\s+(?:урона\s+)?([а-яё]+)', tail, re.I)
-        mana = re.search(rf'\b({NUMBER_TEXT})\s+(?:единиц\w*\s+)?ман[ыуа]\b', tail, re.I)
-        if not dice or not mana:
-            continue
-        element = next((kind for stem, kind in ELEMENT_NAMES.items() if dice[2].casefold().startswith(stem)), None)
-        if not element:
-            continue
-        cooldown = re.search(rf'\b(?:восстановление|перезарядка|перезаряжается за)\s*[:—–-]?\s*({NUMBER_TEXT})\s+раунд', tail, re.I)
-        cost = mana[1].casefold()
-        wait = cooldown[1].casefold() if cooldown else '0'
-        learned.append({'kind': 'spell', 'name': match[1], 'description': 'Изучено в ходе приключения.',
-                        'mechanics': {'dice': dice[1], 'element': element,
-                                      'cost': int(cost) if cost.isdigit() else NUMBER_WORDS[cost],
-                                      'cooldown': int(wait) if wait.isdigit() else NUMBER_WORDS[wait]},
-                        'evidence': match[0]})
-    return learned
+        mechanics = narrated_spell_mechanics(tail)
+        if mechanics:
+            learned.append({'kind': 'spell', 'name': match[1], 'description': 'Изучено в ходе приключения.',
+                            'mechanics': mechanics, 'evidence': match[0]})
+    if learned:
+        return learned
+
+    # An instructor may dictate the formula first, then confirm a single taught spell.
+    evidence = reply[-600:].strip()
+    if not re.search(r'\bурок\s+заверш[её]н\b|\bзаклинание\s+изучено\b', evidence, re.I):
+        return []
+    if re.search(r'\b(?:не изучен\w*|не выучен\w*|не заверш[её]н\w*|если (?:ты|урок))\b', evidence, re.I):
+        return []
+    named = re.findall(r'\b(?:теперь\s+)?ты\s+знаешь\s+[«“"]([^»”"\n]{3,100})[»”"]', evidence, re.I)
+    if len(set(named)) != 1:
+        return []
+    mechanics = narrated_spell_mechanics(evidence)
+    if not mechanics:
+        return []
+    return [{'kind': 'spell', 'name': named[0], 'description': 'Изучено в ходе приключения.',
+             'mechanics': mechanics, 'evidence': evidence}]
 
 
 def attach_learned_spell(state, proposals):
