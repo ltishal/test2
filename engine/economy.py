@@ -97,9 +97,12 @@ DISPLAYED_STOCK = (
     r'(?:(?:выставил[аи]?|выложил[аи]?)\s+на прилавок|'
     r'(?:на прилавке|у прилавка(?:\s+(?-i:[А-ЯЁ][а-яё-]+))?|перед тобой)\s+лежат)'
 )
-STOCK_COUNT = rf'(?:{COUNT}|оба|обе)'
+EMPTY_STOCK = r'(?:0|ноль|нуль|ни\s+одн(?:ого|ой))'
+STOCK_COUNT = rf'(?:{COUNT}|оба|обе|{EMPTY_STOCK})'
+STOCK_STATEMENT = rf'(?:не\s+остал(?:ся|ось|ись|ась)\s+(?=ни\s)|{STOCK_PREFIX}\s+)'
 EXPLICIT_STOCK = re.compile(
-    rf'\b(?:{STOCK_PREFIX}|{DISPLAYED_STOCK}|перед н(?:им|ей)\s+[—–-])\s+({STOCK_COUNT})\b', re.I
+    rf'\b(?:{STOCK_STATEMENT}|(?:{DISPLAYED_STOCK}|перед н(?:им|ей)\s+[—–-])\s+)({STOCK_COUNT})\b',
+    re.I,
 )
 STOCKED_QUOTE = re.compile(
     rf'\b{STOCK_PREFIX}\s+({STOCK_COUNT})\s+([а-яё]+(?:\s+[а-яё]+){{0,3}}?)\s+по\s+'
@@ -129,7 +132,7 @@ ADJACENT_STOCK = re.compile(
     r'^[»" ,;]*(?:[.!?]\s*)?(?:(?:торговец|продавец|он|она)\s+подтверждает,?\s+что\s+)?'
     r'(?:(?:он|она)\s+сверяется с полкой и сообщает:\s*)?'
     r'(?:после продажи[^.!?;]{0,42}?\s+)?(?:у него\s+|у не[её]\s+|на прилавке\s+|в продаже\s+)?'
-    rf'{STOCK_PREFIX}\s+{STOCK_COUNT}\b([^.!?;»"]{{0,45}})', re.I
+    rf'{STOCK_STATEMENT}{STOCK_COUNT}\b([^.!?;»"]{{0,45}})', re.I
 )
 
 TRADE_CONTEXT = re.compile(r'торгов|продав|лавк|прилав|таблич|прайс|дощечк\w* с (?:меловой )?надписью', re.I)
@@ -137,10 +140,13 @@ ASK_PRICE = re.compile(r'\b(?:спрашива\w*|уточня\w*|узна\w*|п
 
 
 def stated_stock(value):
+    value = proof_text(value)
     match = EXPLICIT_STOCK.search(value) or STOCK.search(value)
     if not match:
         return None
     count = match[1].casefold()
+    if re.fullmatch(EMPTY_STOCK, count):
+        return 0
     if count in ('оба', 'обе'):
         return 2
     return int(count) if count.isdigit() else WORDS[count]
@@ -170,7 +176,7 @@ def offers_from_story(reply, action=""):
         stock = stated_stock(stock_match[0]) if stock_match else None
         evidence = clean[match.start():match.end() + (stock_match.end() if stock_match else 0)].strip(' «»":')
         currency, amount = price[0]
-        quotes.append({"item": name, "currency": currency, "price": amount, "stock": stock or 1,
+        quotes.append({"item": name, "currency": currency, "price": amount, "stock": 1 if stock is None else stock,
                        "stock_explicit": stock is not None, "evidence": evidence})
     stocked = [(match[2], match[0]) for pattern in (STOCKED_QUOTE, HIS_STOCK_QUOTE)
                for match in pattern.finditer(clean)]
@@ -347,7 +353,7 @@ def merge_offers(state, proposed, reply, *, action=""):
             from engine.world import records, life_state
             seller=next((e for e in records(state) if e['id']==seller_id and e.get('kind')=='npc' and life_state(e)=='alive' and trade_key(e.get('location'))==trade_key(location)),None)
             if not seller or trade_key(seller['name']) not in trade_key(quote['evidence']): continue
-        explicit = EXPLICIT_STOCK.search(quote['evidence'])
+        explicit = EXPLICIT_STOCK.search(proof_text(quote['evidence']))
         stock = stated_stock(quote['evidence']) if explicit else quote.get('stock', 1)
         if not explicit:
             corroboration = [extra for extra in inferred if extra['stock_explicit']
@@ -358,7 +364,10 @@ def merge_offers(state, proposed, reply, *, action=""):
             if len(corroboration) == 1:
                 stock = corroboration[0]['stock']
                 quote = {**quote, 'evidence': corroboration[0]['evidence'], 'stock_explicit': True}
-        if type(stock) is not int or not 1<=stock<=99: continue
+        if type(stock) is not int or not 0 <= stock <= 99:
+            continue
+        if stock == 0 and stated_stock(quote['evidence']) != 0:
+            continue
         if stock > 1 and stated_stock(quote['evidence']) != stock:
             continue
         canonical = next((old["item"] for old in offers

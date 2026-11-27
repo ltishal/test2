@@ -380,12 +380,13 @@ def shot_cover(reply, target_name=""):
     adjustments = []
     for clause in re.split(r'[.!?;\n]', clean):
         normalized = key(clause)
-        if re.search(r'\b(?:если|возможно|без укрытия)\b', clause, re.I):
+        if re.search(r'\b(?:если|возможно|без укрытия|не (?:в|получает|находится))\b', normalized):
             continue
         refers_to_target = re.search(r'\b(?:цел[ьи]|целям|противник\w*|ему|ей|его|е[её])\b', normalized)
         if not refers_to_target and (not target_name or key(target_name) not in normalized):
             continue
-        if re.search(r'три четверти.*укрыти|укрыти\w* (?:на )?три четверти', clause, re.I):
+        quarters = r'(?:три четверти|трех четверт(?:ей|ях|и)|тремя четвертями)'
+        if re.search(rf'{quarters}[^.!?]{{0,30}}\bукрыти|укрыти\w* (?:на )?{quarters}', normalized):
             adjustments.append(5)
         elif re.search(r'половинн\w* укрыти|частичн\w* укрыти', clause, re.I):
             adjustments.append(2)

@@ -34,6 +34,23 @@ class Alpha51Test(unittest.TestCase):
             with self.subTest(action=action):
                 self.assertIsNone(narrated_weapon(self.state, action))
 
+    def test_three_quarters_cover_variants_use_the_same_card_dc(self):
+        action = 'Стреляю в гоблина за ветвями.'
+        weapon = narrated_weapon(self.state, action)
+        phrases = ('Гоблин за ветвями получает три четверти укрытия.',
+                   'Гоблин за ветвями находится в трёх четвертях укрытия.',
+                   'Гоблин за ветвями в укрытии на три четверти.')
+        for phrase in phrases:
+            with self.subTest(phrase=phrase):
+                reply = phrase + ' Сложность: **DC 10**. Команда: **/roll 1d20+5, DC 10**.'
+                check = narrated_ranged_check(self.state, weapon, action, reply, {'target': 'Гоблин за ветвями'})
+                self.assertEqual((check['dc'], check['world_target_id']), (15, 'g'))
+                visible = check_instructions_in_card(reply, check)
+                self.assertIn('DC 15', visible)
+                self.assertNotIn('DC 10', visible)
+        self.assertEqual(shot_cover('Если Гоблин за ветвями останется в трёх четвертях укрытия.', 'Гоблин за ветвями'), 0)
+        self.assertEqual(shot_cover('Гоблин за ветвями не находится в трёх четвертях укрытия.', 'Гоблин за ветвями'), 0)
+
     def test_starting_armor_variant(self):
         self.assertEqual(item_spec({}, 'Кожаный доспех'), item_spec({}, 'кожаная броня'))
 

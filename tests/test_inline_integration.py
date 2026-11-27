@@ -544,6 +544,86 @@ class InlineIntegrationTest(unittest.TestCase):
         self.assertEqual(self.m._safe_name('../..'), '')
         self.assertLessEqual(len(self.m._safe_name('я' * 300).encode()), 128)
 
+    def test_alpha511_health_recap_only_corrects_hero_hp(self):
+        story = ('У гоблина HP: 3/8. У его союзника текущее здоровье: 2/8. '
+                 'Текущие HP по листу: **17 из 24**. Текущее здоровье героя: 17/24.')
+        updated = self.m._synchronize_recap(story, {'hp': 24, 'max_hp': 24}, None)
+        self.assertEqual(updated, ('У гоблина HP: 3/8. У его союзника текущее здоровье: 2/8. '
+                                   'Текущие HP по листу: **24/24**. Текущее здоровье героя: 24/24.'))
+
+    def test_alpha511_reported_zero_stock_blocks_buy_and_survives_repeat_quote(self):
+        from engine.economy import current_offers, merge_offers
+        state = {**self.m.DEFAULT_STATE, 'name': 'Руна', 'race': 'человек', 'class': 'лучник',
+                 'scene': {'location': 'Двор'}, 'silver': 20, 'inventory': []}
+        price = 'Торговец сообщает: дорожный паёк — 5 серебряных'
+        state['shop_offers'] = merge_offers(state, [], price + '; в продаже осталось два.')
+        offer_id = current_offers(state)[0]['offer_id']
+        for stock in ('в продаже осталось 0', 'в продаже осталось **ноль**',
+                      'в продаже не осталось ни одного'):
+            with self.subTest(stock=stock):
+                story = price + '; ' + stock + '.'
+                closed = {**state, 'shop_offers': merge_offers(state, [], story)}
+                self.assertEqual(current_offers(closed), [])
+                saved, = current_offers(closed, include_sold_out=True)
+                self.assertEqual((saved['offer_id'], saved['stock']), (offer_id, 0))
+                closed['shop_offers'] = merge_offers(closed, [], price + '.')
+                with self.assertRaises(ValueError):
+                    self.m._engine_command(closed, '/buy ' + offer_id, None)
+                self.assertEqual((closed['silver'], closed['inventory']), (20, []))
+                closed['shop_offers'] = merge_offers(closed, [], price + '; в продаже осталось три.')
+                reopened, = current_offers(closed)
+                self.assertEqual((reopened['offer_id'], reopened['stock']), (offer_id, 3))
+        unsupported = {'item': 'дорожный паёк', 'currency': 'silver', 'price': 5, 'stock': 0,
+                       'evidence': price}
+        unchanged = {**state, 'shop_offers': merge_offers(state, [unsupported], price)}
+        self.assertEqual(current_offers(unchanged)[0]['stock'], 2)
+
+    def test_alpha511_letter_requires_same_npc_in_action_and_reply(self):
+        letter = {'id': 'seal', 'name': 'Запечатанное письмо', 'quantity': 1}
+        state = {**self.m.DEFAULT_STATE, 'name': 'Ива', 'race': 'человек', 'class': 'маг',
+                 'scene': {'location': 'Архив'}, 'inventory': [letter],
+                 'world_entities': [
+                     {'id': 'guard', 'name': 'Орен', 'kind': 'npc', 'role': 'страж', 'location': 'Архив'},
+                     {'id': 'merchant', 'name': 'Орен', 'kind': 'npc', 'role': 'торговец', 'location': 'Архив'},
+                 ]}
+        action = 'Передаю запечатанное письмо стражу Орену.'
+        wrong = 'Торговец Орен принимает запечатанное письмо.'
+        right = 'Страж Орен принимает запечатанное письмо.'
+        for request, reply in ((action, wrong), ('Передаю письмо Орену.', right),
+                               (action, right.rstrip('.') + ', если ты согласишься.')):
+            with self.subTest(request=request, reply=reply):
+                history = [{'role': 'user', 'content': request}, {'role': 'assistant', 'content': reply}]
+                updated = self.m.extract_state(history, state, inline_delta={
+                    'item_transfers': [{'id': 'seal', 'quantity': 1, 'holder': 'Торговец Орен',
+                                        'evidence': reply}],
+                    'inventory_remove': [{'id': 'seal', 'quantity': 1}],
+                    'resource_events': {'inventory': reply},
+                    'facts': [{'id': 'letter', 'subject': 'Запечатанное письмо', 'detail': 'Передано.',
+                               'holder': 'Торговец Орен', 'status': 'confirmed'}],
+                })
+                self.assertEqual(updated['inventory'], [letter])
+                self.assertFalse(any(fact.get('holder') for fact in updated['facts']))
+                self.assertTrue(any('Уточните получателя' in log for log in updated['effect_log']))
+
+        party_id, request_id = uuid4().hex, uuid4().hex
+        narrated = [{'role': 'user', 'content': action},
+                    {'role': 'assistant', 'content': 'Ты вручаешь **запечатанное письмо** стражу Орену.'}]
+        delivered = self.m.extract_state(narrated, state, inline_delta={})
+        self.assertEqual(delivered['inventory'], [])
+        self.assertEqual([(fact['holder'], fact['holder_id']) for fact in delivered['facts'] if fact.get('holder')],
+                         [('Страж Орен', 'guard')])
+        self.m.PARTIES.create(self.owner, party_id, state, [])
+        self.m.PARTIES.stage(self.owner, party_id, 0, request_id, {'role': 'user', 'content': action},
+                             {'role': 'assistant', 'content': right, '_state_delta': {}})
+        self.data.update(party_id=party_id, request_id=request_id)
+        committed = self.commit()
+        self.assertEqual(committed, self.commit())
+        self.assertEqual(committed['revision'], 1)
+        self.assertEqual(committed['state']['inventory'], [])
+        fact, = [fact for fact in committed['state']['facts'] if fact.get('holder')]
+        self.assertEqual((fact['holder'], fact['holder_id']), ('Страж Орен', 'guard'))
+        self.assertEqual(self.m.PARTIES.get(self.owner, party_id)['state'], committed['state'])
+
     def test_signed_npc_attack_damage_survives_http_roll_and_turn_commit(self):
         if not hasattr(self.m.app, 'test_client'):
             self.skipTest('Flask is required to test the HTTP interface')

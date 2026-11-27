@@ -45,7 +45,7 @@ from engine.constructor import (CONSTRUCTOR_PROMPT, TYPES, apply_blueprints, app
 from engine.turn_protocol import DeltaStream, PROTOCOL_PROMPT, validate_delta
 from engine.world import (WORLD_PROMPT, world_context, merge_entities, npc_damage,
                           bind_damage_target, apply_npc_damage, combat_ready, sync_life, restore_scene_people,
-                          entity_names, life_state)
+                          entity_names, entry_roles, is_present, key as world_key, life_state)
 
 from engine.effects import (EFFECT_PROMPT, PASSIVE_OBSERVATION, resolve_effects, effect_context, check_bonus,
                             complete_hero_damage, control_restriction, hero_incapacitated, STATS, descriptive_damage)
@@ -58,7 +58,7 @@ from party_store import PartyConflict, PartyMissing, PartyStore
 from token_usage import TokenUsage, state_turn_id
 
 BASE_DIR = Path(__file__).resolve().parent
-APP_REVISION = "2026-11-27.world-alpha5.1"
+APP_REVISION = "2026-11-27.world-alpha5.1.1"
 QWEN_SUMMARY_LIMIT = 480
 QWEN_STATE_LIMIT = 1100
 QWEN_STATE_SETUP_LIMIT = 2200
@@ -1134,27 +1134,86 @@ def _inventory_with_ids(items):
 
 
 SEALED_LETTER = re.compile(r'\bзапечатанн\w*\s+(?:конверт\w*|письм\w*)\b', re.I)
+LETTER_HANDOFF = re.compile(r'\b(?:передаю|вручаю|отдаю)\b[^.!?;\n]*\b(?:письм\w*|конверт\w*)\b', re.I)
 LETTER_RECEIVED = re.compile(
     r'\b(?:протягивает|вручает|переда[её]т)\s+(?:тебе\s+)?' + SEALED_LETTER.pattern, re.I
 )
 LETTER_RECIPIENT = re.compile(
-    r'\b((?:(?i:страж|стражник|торговец|архивистка)\s+)?[А-ЯЁ][а-яё-]{2,30})\s+'
-    r'(?i:принимает|бер[её]т)\s+(?:у тебя\s+)?' + SEALED_LETTER.pattern
+    r'\b((?:(?i:страж|стражник|торговец|купец|архивистка|архивист)\s+)?'
+    r'[А-ЯЁ][а-яё-]{2,30}(?: [А-ЯЁ][а-яё-]{2,30})?)\s+'
+    r'(?i:принимает|принял[аи]?|бер[её]т|взял[аи]?)\s+(?:у тебя\s+)?' + SEALED_LETTER.pattern
 )
+LETTER_DELIVERED = re.compile(
+    r'\bты\s+(?:переда[её]шь|вручаешь|отда[её]шь)\b[^.!?;\n]{0,120}', re.I
+)
+LETTER_ROLES = {
+    'страж': r'страж(?:у|нику)?|стражник',
+    'торговец': r'торгов(?:ец|цу)|куп(?:ец|цу)',
+    'архивист': r'архивист(?:у|ка|ке)?',
+}
 
 
-def narrated_letter_transfer(items, action, latest):
-    if not re.search(r"\b(?:передаю|вручаю|отдаю)\b", action, re.I) or not re.search(r"письм|конверт", action, re.I):
+def letter_recipient(reference, candidates, *, dative=False):
+    normalized = world_key(reference)
+    roles = {role for role, pattern in LETTER_ROLES.items() if re.search(rf'\b(?:{pattern})\b', normalized)}
+    title = '|'.join(LETTER_ROLES.values())
+    name_reference = re.sub(rf'^(?:{title})\s+', '', normalized)
+
+    def matches_name(alias):
+        name = re.sub(rf'^(?:{title})\s+', '', world_key(alias))
+        if not name:
+            return False
+        if not dative:
+            return name == name_reference
+        forms = []
+        for word in name.split():
+            declined = (word[:-1] + 'е' if word.endswith(('а', 'я')) else
+                        word[:-1] + 'ю' if word.endswith(('й', 'ь')) else word + 'у')
+            forms.append(rf'(?:{re.escape(word)}|{re.escape(declined)})')
+        return bool(re.search(r'\b' + r'\s+'.join(forms) + r'\b', normalized))
+
+    by_name = [npc for npc in candidates if any(matches_name(alias) for alias in entity_names(npc))]
+    if not by_name and not (dative and roles):
         return None
-    if re.search(r"\bне\s+(?:передаю|вручаю|отдаю)\b", action, re.I):
+    # A role alone can identify a recipient, but a title with an unknown name cannot.
+    if not by_name and any(re.search(rf'\b(?i:{LETTER_ROLES[role]})\s+[А-ЯЁ][а-яё-]+', reference)
+                           for role in roles):
         return None
-    match = LETTER_RECIPIENT.search(latest)
-    if not match or re.search(r"\b(?:если|может|не)\b", re.split(r"[.!?;\n]", latest[:match.start()])[-1], re.I):
-        return None
+    matches = [npc for npc in (by_name or candidates) if not roles or roles & entry_roles(npc)]
+    return matches[0] if len(matches) == 1 else None
+
+
+def narrated_letter_transfer(items, action, latest, entities, location):
     letters = [item for item in items if SEALED_LETTER.search(_item_name(item))]
-    if len(letters) == 1:
-        return {"id": letters[0]["id"], "quantity": 1, "holder": match[1], "evidence": match[0]}
-    return None
+    action = re.sub(r'[*_`]', '', action)
+    handoff = LETTER_HANDOFF.search(action)
+    if len(letters) != 1 or not handoff or re.search(r'\bне\s*$', action[:handoff.start()], re.I):
+        return None
+    # Keep the recipient after the letter as well as before it in the same clause.
+    clause = re.split(r'[.!?;\n]', action[handoff.start():], maxsplit=1)[0]
+    latest_clean = re.sub(r'[*_`]', '', latest)
+    matches = list(LETTER_RECIPIENT.finditer(latest_clean))
+    by_recipient = bool(matches)
+    if not matches:
+        matches = [match for match in LETTER_DELIVERED.finditer(latest_clean) if SEALED_LETTER.search(match[0])]
+    if len(matches) != 1:
+        return None
+    match, = matches
+    prefix = re.split(r'[.!?;\n]', latest_clean[:match.start()])[-1]
+    suffix = re.split(r'[.!?;\n]', latest_clean[match.end():], maxsplit=1)[0]
+    if re.search(r'\b(?:если|может|не)\b', prefix, re.I) or re.search(r'\bесли\b', match[0] + suffix, re.I):
+        return None
+    candidates = [npc for npc in entities if npc.get('kind') == 'npc' and is_present(npc)
+                  and world_key(npc.get('location')) == world_key(location)]
+    intended = letter_recipient(clause, candidates, dative=True)
+    actual = letter_recipient(match[1] if by_recipient else match[0], candidates, dative=not by_recipient)
+    if not intended or not actual or intended['id'] != actual['id']:
+        return None
+    holder = match[1] if by_recipient else actual['name']
+    if not by_recipient and isinstance(actual.get('role'), str) and actual['role']:
+        holder = f"{actual['role'].capitalize()} {holder}"
+    return {"id": letters[0]["id"], "quantity": 1, "holder": holder,
+            "holder_id": actual['id'], "evidence": match[0]}
 
 
 def receives_sealed_letter(action, latest):
@@ -1173,13 +1232,13 @@ def receives_sealed_letter(action, latest):
     )
 
 
-def _transfer_items(items, transfers, latest):
+def _transfer_items(items, transfers, latest, *, letter_transfer=None):
     owners = []
     applied = set()
     if not isinstance(transfers, list):
         return items, owners
     for event in transfers:
-        if not isinstance(event, dict) or not _grounded_event(event.get("evidence"), latest):
+        if not isinstance(event, dict) or (event is not letter_transfer and not _grounded_event(event.get("evidence"), latest)):
             continue
         item_id, quantity, holder = event.get("id"), event.get("quantity"), event.get("holder")
         if not isinstance(item_id, str) or type(quantity) is not int or quantity <= 0:
@@ -1194,8 +1253,10 @@ def _transfer_items(items, transfers, latest):
             continue
         items = _remove_inventory_items(items, [{"id": item_id, "quantity": quantity}])
         applied.add(transfer)
-        owners.append({"id": "item-" + item_id + "-" + _quest_name(holder), "subject": item["name"],
+        holder_id = letter_transfer["holder_id"] if event is letter_transfer else None
+        owners.append({"id": "item-" + item_id + "-" + (holder_id or _quest_name(holder)), "subject": item["name"],
                        "item_id": item_id,
+                       "holder_id": holder_id,
                        "detail": f"Передано: {quantity}.", "holder": holder,
                        "source": event["evidence"], "status": "confirmed"})
     return items, owners
@@ -1665,7 +1726,8 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
         close_overdue_events(new_state["agenda"], minute)
     else:
         new_state.pop("agenda", None)
-    campaign_facts = merge_facts(current.get("facts"), new_state.pop("facts", None))
+    fact_updates = new_state.pop("facts", None)
+    campaign_facts = merge_facts(current.get("facts"), [])
     campaign_facts = record_npc_actions(campaign_facts, new_state.pop("npc_actions", None),
                                         campaign_scene, minute, grounded)
     effect_proposals = new_state.pop("effects", None)
@@ -1793,14 +1855,35 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
             current["mana"] = current["max_mana"]
 
     transfers = new_state.pop("item_transfers", None)
+    letter_log = []
+    letter_transfer = None
     if not new_character:
         items = _inventory_with_ids(current.get("inventory"))
-        fallback = narrated_letter_transfer(items, action, latest)
-        if fallback:
-            transfers = transfers if isinstance(transfers, list) else []
-            if not any(isinstance(event, dict) and event.get("id") == fallback["id"]
-                       and _grounded_event(event.get("evidence"), latest) for event in transfers):
-                transfers = [*transfers, fallback]
+        letter_ids = {item["id"] for item in items if SEALED_LETTER.search(_item_name(item))}
+        transfers = transfers if isinstance(transfers, list) else []
+        proposed_letter = any(isinstance(event, dict) and isinstance(event.get("id"), str)
+                              and event["id"] in letter_ids for event in transfers)
+        protect_letter = letter_ids and (LETTER_HANDOFF.search(action) or proposed_letter)
+        if protect_letter:
+            letter_transfer = narrated_letter_transfer(items, action, latest, entities, campaign_scene.get("location"))
+            transfers = [event for event in transfers if not isinstance(event, dict)
+                         or not isinstance(event.get("id"), str) or event["id"] not in letter_ids]
+            if letter_transfer:
+                transfers.append(letter_transfer)
+            else:
+                letter_log.append("Отклонено: передача письма не подтверждена. Уточните получателя.")
+            for field in ("inventory", "inventory_remove"):
+                if isinstance(new_state.get(field), list):
+                    new_state[field] = [item for item in new_state[field]
+                                        if not SEALED_LETTER.search(_item_name(item))
+                                        and not (isinstance(item, dict) and isinstance(item.get("id"), str)
+                                                 and item["id"] in letter_ids)]
+            if isinstance(fact_updates, list):
+                letter_facts = {fact["id"] for fact in campaign_facts if SEALED_LETTER.search(fact.get("subject", ""))}
+                fact_updates = [patch for patch in fact_updates if not isinstance(patch, dict) or not (
+                    isinstance(patch.get("subject"), str) and SEALED_LETTER.search(patch["subject"])
+                    or isinstance(patch.get("id"), str) and patch["id"].casefold() in letter_facts)]
+    new_state["facts"] = merge_facts(new_state["facts"], fact_updates)
     owned_ammo = resolved_ammo or (shot_weapon or {}).get("ammo")
     ammo_log = []
     if resolved_ammo or (shot_weapon and not next_check and SHOT_EVENT.search(latest)
@@ -1817,7 +1900,7 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
                          and (not isinstance(item, dict) or item.get("id") not in ammo_ids)]
     if transfers and not new_character:
         current["inventory"], transfer_facts = _transfer_items(
-            _inventory_with_ids(current.get("inventory")), transfers, latest,
+            _inventory_with_ids(current.get("inventory")), transfers, latest, letter_transfer=letter_transfer,
         )
         new_state["facts"] = merge_facts(new_state["facts"], transfer_facts)
         transferred_names = {_item_name(fact["subject"]) for fact in transfer_facts}
@@ -2105,7 +2188,7 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
             merged['effect_log']=logs+merged['effect_log']
         for entity in merged.get('world_entities',[]):
             if isinstance(entity,dict): sync_life(entity)
-        merged["effect_log"].extend([*ammo_log, *trade_log])
+        merged["effect_log"].extend([*ammo_log, *letter_log, *trade_log])
         merged["combat"] = combat_context(merged)
         check = merged.get("pending_check")
         if check and check.get("kind") != "save" and hero_incapacitated(merged):
@@ -2858,7 +2941,8 @@ def _synchronize_recap(content, state, roll):
     maximum = state.get("max_hp")
     if type(hp) is int and type(maximum) is int:
         content = re.sub(
-            r"(\b(?:текущие HP(?: по листу)?|текущее здоровье|HP)\s*:\s*\*{0,2})"
+            r"(\b(?:текущие HP по листу|(?:текущие )?HP (?:героя|персонажа игрока)|"
+            r"текущее здоровье (?:героя|персонажа игрока))\s*:\s*\*{0,2})"
             r"\d+\s*(?:/|из)\s*\d+",
             lambda match: f"{match[1]}{hp}/{maximum}", content, flags=re.I,
         )
