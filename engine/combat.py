@@ -3,11 +3,11 @@ from copy import deepcopy
 from random import randint
 import re
 
-from campaign import ability_key, apply_ability_event, formula_key
+from campaign import ability_key, apply_ability_event, formula_key, pending_check
 from engine.effects import change_pool, effect_context, check_bonus, hero_incapacitated
 from engine.clock import advance_action
-from engine.equipment import equipped, WEAPONS, ARMOR
-from engine.world import combat_ready, entity_names, key, records, text, life_state
+from engine.equipment import equipped, item_spec, require_ammo, consume_ammo, WEAPONS, ARMOR
+from engine.world import combat_ready, encounter_position, entity_names, key, records, text, life_state
 
 ELEMENTS = {"physical", "fire", "cold", "lightning", "poison", "arcane", "radiant", "shadow"}
 STYLE = {"balanced", "aggressive", "defensive", "caster"}
@@ -233,6 +233,78 @@ def spend_move(actor, ability, cooldowns, round_number, capacity):
         cooldowns[key(ability["name"])] = round_number + ability["cooldown"] + 1
 
 
+SHOT_INTENT = re.compile(r'\b(?:стреляю|выстреливаю|выпускаю(?:\s+\w+){0,5}\s+(?:стрелу|болт))\b', re.I)
+SHOT_EVENT = re.compile(
+    r'\b(?:стреляешь|выстреливаешь|промахиваешься|выпускаешь[^.!?]{0,70}\b(?:стрелу|болт))\b'
+    r'|\b(?:стрела|болт)\s+(?:летит|попада\w*|угожда\w*|вреза\w*|срыва\w*|пролет\w*|проход\w*)\b', re.I
+)
+
+
+def narrated_weapon(state, action):
+    if not SHOT_INTENT.search(action) or re.search(r'\b(?:если|не|собираюсь)\b', action, re.I):
+        return None
+    candidates = []
+    for item in state.get('inventory', []):
+        spec = item_spec(state, item)
+        if not spec or not spec.get('ammo'):
+            continue
+        name = item.get('name') if isinstance(item, dict) else item
+        words = re.findall(r'\w+', key(name))
+        if words and all(len(word) >= 3 and re.search(r'\b' + re.escape(word[:max(3, len(word) - 2)]) + r'\w*\b', action, re.I)
+                         for word in words):
+            return spec
+        candidates.append(spec)
+    held = equipped(state, 'weapon')
+    if held and held.get('ammo'):
+        return held
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def narrated_ranged_check(state, weapon, action, reply, proposal):
+    if not weapon:
+        return None
+    scene = state.get('scene') or {}
+    local = [entity for entity in records(state) if entity.get('kind') in ('npc', 'creature')
+             and key(entity.get('location')) == key(scene.get('location')) and life_state(entity) == 'alive']
+    proposed = proposal if isinstance(proposal, dict) else {}
+    targets = []
+    for entity in local:
+        for name in entity_names(entity):
+            words = set(re.findall(r'\w{3,}', key(name)))
+            if (key(name) == key(proposed.get('target')) or key(name) in key(action)
+                    or (words and all(re.search(r'\b' + re.escape(word[:max(3, len(word) - 2)]) + r'\w*\b',
+                                                action, re.I) for word in words))):
+                targets.append(entity)
+                break
+    if len(targets) != 1 and (position := encounter_position(action)):
+        targets = [entity for entity in local if entity.get('encounter_position') == position]
+    if len(targets) != 1:
+        clean = re.sub(r'[*_`]', '', reply)
+        targets = [entity for entity in local if any(re.search(r'\b' + re.escape(key(name)) + r'\b',
+                   clean.casefold().replace('ё', 'е')) for name in entity_names(entity))]
+    if len(targets) != 1:
+        # A generic target can be resolved only when one living opponent matches.
+        reference = re.search(r'\b(?:в|по)\s+(?:\w+\s+){0,2}(гоблин|голем|волк|волк[ау])\w*\b', action, re.I)
+        matching = [entity for entity in local if reference and reference[1].casefold() in key(entity['name'])]
+        targets = matching if len(matching) == 1 else []
+    if len(targets) != 1:
+        return None
+    target, = targets
+    spec = profile(target)
+    check = pending_check(reply, {'kind': 'attack', 'title': 'Выстрел', 'target': target['name']},
+                          scene, defense_dc=spec['defense'])
+    if not check or formula_key(check["expr"])[1] != 20:
+        return None
+    combat_ready(target, 'normal')
+    if type(target.get('hp')) is not int:
+        return None
+    stat = weapon['stat']
+    check.update(announced_expr=check['expr'], expr=f'1d20{2 + hero_stat(state, stat):+}',
+                 stat=stat, effect_bonus=check_bonus(state, stat), ammo=weapon['ammo'],
+                 world_target_id=target['id'], ranged_dice=weapon['dice'], ranged_element=weapon['element'])
+    return check
+
+
 def combat_turn(original, command, argument, roller=None):
     roller = roller or randint
     state = deepcopy(original)
@@ -309,7 +381,10 @@ def combat_turn(original, command, argument, roller=None):
         move = {"name": "Атака" if not weapon else f"Атака: {weapon}",
                 "dice": WEAPONS.get(weapon, "1d4"), "element": "physical"}
         spec = equipped(state,"weapon")
-        if spec: move.update(dice=spec["dice"],element=spec["element"],stat=spec["stat"])
+        if spec:
+            move.update(spec)
+            if move.get("ammo"):
+                require_ammo(state, move["ammo"])
     log.append(f"Раунд {round_number}.")
     npc_cooldowns = combat.get("npc_cooldowns")
     if not isinstance(npc_cooldowns, dict):
@@ -323,6 +398,8 @@ def combat_turn(original, command, argument, roller=None):
                 if prepared is not None:
                     state.update({field: prepared[field] for field in ("abilities", "mana", "max_mana") if field in prepared})
                     state["ability_cooldowns"] = ready_cooldowns
+                if move.get("ammo"):
+                    log.append(consume_ammo(state, move["ammo"]))
                 stat = state.get("casting_stat", "int") if command == "/cast" else move.get("stat", "str")
                 log.append(strike(state, target, move, 2 + hero_stat(state, stat) + check_bonus(state,stat),
                                   enemy["defense"] + (2 if enemy_guard else 0), enemy["resistances"], roller))
@@ -346,7 +423,11 @@ def combat_turn(original, command, argument, roller=None):
     advance_action(state,6)
     if state["hp"] <= 0 or target["hp"] <= 0:
         state["combat"] = None
-        log.append("Бой завершён.")
+        log.append("Раунд завершён." if any(
+            entity["id"] != target["id"] and entity.get("kind") == "creature"
+            and key(entity.get("location")) == key(location) and life_state(entity) == "alive"
+            and type(entity.get("hp")) is int for entity in records(state)
+        ) else "Бой завершён.")
         if target["hp"] == 0 and not target.get("combat_xp_paid"):
             threat = target.get("threat")
             xp = VICTORY_XP.get(threat if isinstance(threat, str) else "", VICTORY_XP["normal"])

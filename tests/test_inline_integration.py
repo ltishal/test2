@@ -245,6 +245,102 @@ class InlineIntegrationTest(unittest.TestCase):
         self.assertEqual(committed, replay)
         self.assertNotIn('_engine_state', committed['messages'][-1])
 
+    def test_alpha41_ranged_hit_and_miss_are_signed_and_spent_once(self):
+        import json
+        if not hasattr(self.m.app, 'test_client'):
+            self.skipTest('Flask is required to test the HTTP interface')
+        token = 'R' * 43
+        pid = uuid4().hex
+        state = {**self.m.DEFAULT_STATE, 'name': 'Торвин', 'race': 'Дворф', 'class': 'Следопыт',
+                 'stats': {'str': 11, 'dex': 16}, 'scene': {'location': 'Тропа'},
+                 'inventory': ['длинный лук', {'id': 'arrows', 'name': 'стрелы', 'quantity': 20}],
+                 'world_entities': [
+                     {'id': 'forest', 'kind': 'creature', 'name': 'Лесной гоблин', 'location': 'Тропа',
+                      'hp': 8, 'max_hp': 8, 'threat': 'minor'},
+                     {'id': 'road', 'kind': 'creature', 'name': 'Дорожный гоблин', 'location': 'Тропа',
+                      'hp': 8, 'max_hp': 8, 'threat': 'minor'}]}
+        self.m.PARTIES.create(self.m._owner(token), pid, state, [])
+        story = 'Атака из длинного лука по лесному гоблину: **/roll 1d20+3**.'
+        with self.m.app.test_client() as http, patch.multiple(
+            self.m, _check_presence=lambda *a, **kw: {'admitted': True},
+            _schedule_summary=lambda *a, **kw: None,
+        ):
+            http.set_cookie(self.m.OWNER_COOKIE, token)
+
+            def advance(revision, action, narration, changes):
+                wire = narration + START + json.dumps(changes, ensure_ascii=False) + END
+                body = {'party_id': pid, 'revision': revision, 'request_id': uuid4().hex, 'action': action}
+                with patch.object(self.m, '_start_stream', side_effect=lambda *a, **kw: fake_stream(wire)):
+                    response = http.post('/api/chat', json=body)
+                    self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+                    self.assertIn(self.m.TURN_COMPLETE, response.get_data(as_text=True))
+                saved = http.post('/api/state', json=body)
+                self.assertEqual(saved.status_code, 200, saved.get_data(as_text=True))
+                self.assertEqual(saved.json, http.post('/api/state', json=body).json)
+                return saved.json
+
+            def fake_stream(wire):
+                class Stream(list):
+                    def close(self):
+                        pass
+                return Stream([types.SimpleNamespace(usage=None, choices=[
+                    types.SimpleNamespace(finish_reason='stop', delta=types.SimpleNamespace(content=wire))
+                ])])
+
+            move = {'content': 'Беру длинный лук и выпускаю одну обычную стрелу в лесного гоблина.'}
+            first = advance(0, move, story, {})
+            check = first['state']['pending_check']
+            self.assertEqual((check['expr'], check['world_target_id'], check['dc']), ('1d20+5', 'forest', 10))
+            self.assertNotIn('/roll', first['messages'][-1]['content'])
+            self.assertEqual(first['state']['inventory'][1]['quantity'], 20)
+            self.assertEqual(http.post('/api/roll', json={'party_id': pid, 'revision': 1,
+                                                         'expr': '1d20+3'}).status_code, 400)
+            with patch.object(self.m, 'roll_dice', side_effect=[
+                {'expr': '1d20+5', 'rolls': [13]}, {'expr': '1d8', 'total': 4}
+            ]):
+                rolled = http.post('/api/roll', json={'party_id': pid, 'revision': 1, 'expr': '1d20+5'})
+            self.assertTrue(rolled.json['success'])
+            hit = 'Стрела попадает в цель. Теперь брось урон: /roll 1d8.'
+            second = advance(1, {'content': 'Бросаю.', 'roll_receipt': rolled.json['receipt']}, hit,
+                             {'pending_check': {'kind': 'damage', 'target': 'Лесной гоблин'},
+                              'inventory_remove': [{'name': 'стрелы', 'quantity': 1}],
+                              'resource_events': {'inventory': hit}})
+            self.assertEqual(second['state']['inventory'][1]['quantity'], 19)
+            self.assertEqual([e['hp'] for e in second['state']['world_entities']], [4, 8])
+            self.assertIsNone(second['state']['pending_check'])
+            self.assertNotIn('/roll', second['messages'][-1]['content'])
+            third = advance(2, move, story, {})
+            self.assertEqual(third['state']['inventory'][1]['quantity'], 19)
+            with patch.object(self.m, 'roll_dice', return_value={'expr': '1d20+5', 'rolls': [1]}):
+                rolled = http.post('/api/roll', json={'party_id': pid, 'revision': 3, 'expr': '1d20+5'})
+            self.assertFalse(rolled.json['success'])
+            miss = 'Стрела проходит мимо.'
+            fourth = advance(3, {'content': 'Бросаю.', 'roll_receipt': rolled.json['receipt']}, miss,
+                             {'world_entities': [{'id': 'forest', 'status': 'побеждён', 'evidence': miss}]})
+            self.assertEqual(fourth['state']['inventory'][1]['quantity'], 18)
+            self.assertEqual([e['hp'] for e in fourth['state']['world_entities']], [4, 8])
+            self.assertIn('промах', fourth['messages'][-1]['resolution'])
+            self.assertEqual(http.get('/api/parties/' + pid).json['state'], fourth['state'])
+
+    def test_alpha41_spell_formula_is_not_a_hit_and_completed_rest_moves_clock(self):
+        state = {**self.m.DEFAULT_STATE, 'name': 'Ника', 'race': 'Эльф', 'class': 'Маг',
+                 'hp': 4, 'max_hp': 7, 'mana': 1, 'max_mana': 6, 'world_minute': 700}
+        story = ('Ника завершает урок и изучает «Искру тумана»: заклинание наносит 1d4 урона молнией, '
+                 'стоит две маны и перезаряжается за два раунда. Она не применяет его.')
+        history = [{'role': 'user', 'content': 'Заканчиваю урок.'},
+                   {'role': 'assistant', 'content': story}]
+        updated = self.m.extract_state(history, state, inline_delta={'hp_delta': -4, 'hp_event': story})
+        self.assertEqual(updated['hp'], 4)
+        self.assertEqual(updated['abilities'][0]['mechanics']['cooldown'], 2)
+        narration = 'Восемь часов проходят спокойно. Отдых завершён.'
+        history = [{'role': 'user', 'content': 'Устраиваю долгий отдых.'},
+                   {'role': 'assistant', 'content': narration}]
+        for delta in ({}, {'elapsed': {'minutes': 480, 'evidence': narration}}):
+            rested = self.m.extract_state(history, updated, inline_delta=delta)
+            self.assertEqual((rested['world_minute'], rested['hp'], rested['mana']), (1180, 7, 6))
+        downed = self.m.extract_state(history, {**updated, 'hp': 0}, inline_delta={})
+        self.assertEqual((downed['world_minute'], downed['hp']), (1180, 0))
+
     def test_save_name_preserves_cyrillic_and_never_includes_path_separators(self):
         self.assertEqual(self.m._safe_name('Тест Alpha 2.1 — Лея'), 'Тест Alpha 2.1 — Лея')
         self.assertEqual(self.m._safe_name('../..'), '')

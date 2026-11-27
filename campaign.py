@@ -169,7 +169,7 @@ def pending_check(reply, proposed=None, scene=None, *, defense_dc=None):
 def check_instructions_in_card(reply, check):
     """Show an announced formula in its check card and keep other commands in prose."""
     commands = list(ROLL_COMMAND.finditer(reply))
-    if not commands or any(formula_key(match[1]) != formula_key(check["expr"]) for match in commands):
+    if not commands or any(formula_key(match[1]) != formula_key(check.get("announced_expr", check["expr"])) for match in commands):
         return reply
     return re.sub(
         r"(?:\*\*|\x60)*(?:команда\s*:\s*)?(?:\*\*|\x60)*"
@@ -221,6 +221,10 @@ def roll_result(check, roll):
         dc = check.get("dc")
         if type(dc) is int:
             result["success"] = result["total"] >= dc
+        if check.get("ammo") and check.get("kind") == "attack" and count == 1 and sides == 20:
+            result["success"] = dice[0] == 20 or (dice[0] != 1 and result["success"])
+            if type(roll.get("ranged_damage")) is int and 0 <= roll["ranged_damage"] <= 300:
+                result["ranged_damage"] = roll["ranged_damage"] if result["success"] else 0
         damage = roll.get("npc_attack_damage")
         if check.get("kind") == "attack" and check.get("actor_id") and isinstance(result.get("success"), bool):
             if not result["success"] or check.get("practice"):

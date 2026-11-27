@@ -2,7 +2,6 @@
 import re
 import json
 from copy import deepcopy
-from hashlib import sha256
 from uuid import uuid4
 
 KINDS = {'npc', 'creature', 'item', 'location', 'faction', 'ability', 'other'}
@@ -54,8 +53,7 @@ def combat_ready(entity, threat):
             or life_state(entity) != 'alive'):
         return
     low, high = THREAT_HP[threat]
-    seed = int.from_bytes(sha256(entity['id'].encode()).digest()[:4], 'big')
-    hp = low + seed % (high - low + 1)
+    hp = (low + high) // 2
     entity.update(threat=threat, hp=hp, max_hp=hp)
 
 
@@ -118,6 +116,14 @@ def merge_entities(state, proposals, reply):
                 same = [e for e in matches if key(e.get('location')) == location]
                 unknown = [e for e in matches if not key(e.get('location'))]
                 matches = same or (unknown if len(matches)==1 else [])
+            if not matches and location and kind in ('creature', 'npc') and not patch.get('new_entity'):
+                position = encounter_position(name)
+                if position:
+                    matches = [e for e in result if e.get('encounter_position') == position
+                               and key(e.get('location')) == location]
+                    if len(matches) == 1 and key(name) != key(matches[0]['name']):
+                        aliases = entity_names(matches[0])[1:]
+                        matches[0]['aliases'] = [*aliases, name][:8]
             if len(matches)>1: continue
             entity = matches[0] if matches else None
             if entity is None:
@@ -167,35 +173,100 @@ def merge_entities(state, proposals, reply):
     return result
 
 
-ROLE_NAME = re.compile(r"\b((?i:торговец|купец|страж(?:ник)?|сторож))\s+([А-ЯЁ][а-яё-]{2,30})\b")
-ROLE_NAME_REVERSED = re.compile(r"\b([А-ЯЁ][а-яё-]{2,30})\s*(?:,\s*|[—–]\s*)(?:(?i:портовый)\s+)?((?i:торговец|купец|страж(?:ник)?|сторож))\b")
+PERSON_NAME = r"[А-ЯЁ][а-яё-]{2,30}(?: [А-ЯЁ][а-яё-]{2,30})?"
+NPC_ROLES = {
+    'торговец': 'торговец', 'купец': 'торговец', 'страж': 'страж',
+    'стражник': 'страж', 'сторож': 'сторож', 'наниматель': 'наниматель',
+    'спутник': 'спутник', 'проводник': 'проводник', 'дворф': 'дворф',
+}
+ROLE_WORD = r"(?i:" + '|'.join(NPC_ROLES) + r")"
+ROLE_NAME = re.compile(rf"\b({ROLE_WORD})(?:-{ROLE_WORD})?\s+({PERSON_NAME})\b")
+ROLE_NAME_REVERSED = re.compile(
+    rf"\b({PERSON_NAME})\s*(?:,\s*|[—–]\s*)(?:(?i:портовый)\s+)?"
+    rf"(?:(?i:дворф)-)?({ROLE_WORD})\b"
+)
+GOBLIN_ENCOUNTER = re.compile(r'\b(?:трое|три|3)\s+гоблин(?:а|ов)\b', re.I)
+GOBLIN_POSITIONS = {
+    'повозка': r'целит(?:ся|ься)|у повозк|ближайш|засадник',
+    'ветви': r'перекрыва\w* дорогу|ветв|попер[её]к',
+    'лес': r'пятится|к лесу|у леса|лесно[йго]+|отступа',
+}
+# Position aliases connect initial narration to later model patches.
+GOBLIN_NAMES = {'повозка': 'Гоблин у повозки', 'ветви': 'Гоблин за поваленными ветвями',
+                'лес': 'Гоблин у леса'}
 
 
-def restore_scene_people(entities, scene, reply, previous_scene=None):
-    """Store explicit role/name introductions when the service delta omits them."""
+def encounter_position(value):
+    if not re.search(r'\bгоблин', value, re.I):
+        return None
+    positions = [position for position, pattern in GOBLIN_POSITIONS.items()
+                 if re.search(pattern, value, re.I)]
+    return positions[0] if len(positions) == 1 else None
+
+
+def entry_roles(entry):
+    fields = ' '.join(str(entry.get(field, '')) for field in ('traits', 'description', 'role'))
+    return {NPC_ROLES[role.casefold()] for role in re.findall(rf'\b{ROLE_WORD}\b', fields)}
+
+
+def restore_scene_people(entities, scene, reply, previous_scene=None, hero_name=None):
+    """Recover named people and clearly enumerated opponents omitted from a delta."""
     location = scene.get('location') if isinstance(scene, dict) else None
     if not location:
         return entities
     if isinstance(previous_scene, dict) and previous_scene.get('location') and re.search(
             r'\b(?:оба|обе|они)\b[^.]{0,50}\bоста[лются]+\w*\s+позади', reply, re.I):
         location = previous_scene['location']
-    found = [(m[1], m[2]) for m in ROLE_NAME.finditer(reply)]
-    found.extend((m[2], m[1]) for m in ROLE_NAME_REVERSED.finditer(reply))
-    roles = {'торговец': 'торговец', 'купец': 'торговец', 'страж': 'страж',
-             'стражник': 'страж', 'сторож': 'сторож'}
+    clean = re.sub(r'[*_`]', '', reply)
+    found = [(m[1], m[2]) for m in ROLE_NAME.finditer(clean)]
+    found.extend((m[2], m[1]) for m in ROLE_NAME_REVERSED.finditer(clean))
     for role, name in found:
-        role = roles[role.casefold()]
+        if key(name) == key(hero_name):
+            continue
+        role = NPC_ROLES[role.casefold()]
         local = [entry for entry in entities if entry.get('kind') == 'npc'
                  and any(key(name) == key(alias) for alias in entity_names(entry))
-                 and key(entry.get('location')) == key(location)]
-        if any(role in key(' '.join(str(entry.get(k, '')) for k in ('name', 'traits', 'description', 'role'))) for entry in local):
+                 and key(entry.get('location')) in ('', key(location))]
+        if any(role in entry_roles(entry) for entry in local):
             continue
-        if len(local) == 1 and not local[0].get('role') and not any(
-                token in key(str(local[0].get('description', ''))) for token in roles):
-            local[0]['role'] = role
+        if len(local) == 1 and (len(name.split()) > 1 or not entry_roles(local[0])):
+            local[0].setdefault('location', location)
+            if role != 'дворф' or not local[0].get('role'):
+                local[0]['role'] = role
             continue
         entities.append({'id': uuid4().hex, 'kind': 'npc', 'name': name, 'location': location,
                          'description': role.capitalize() + '.', 'role': role, 'life_state': 'alive'})
+
+    encounter = GOBLIN_ENCOUNTER.search(clean)
+    if encounter:
+        description = clean[encounter.start():encounter.end() + 300]
+        positions = [position for position, pattern in GOBLIN_POSITIONS.items()
+                     if re.search(pattern, description, re.I)]
+        if len(positions) == 3 and re.search(r'\b(?:второй|другой)\b', description, re.I) and re.search(
+                r'\bтретий\b', description, re.I):
+            for position in positions:
+                local = [entry for entry in entities if entry.get('kind') in ('npc', 'creature')
+                         and key(entry.get('location')) == key(location)
+                         and encounter_position(entry['name']) == position]
+                if not local:
+                    entry = {'id': uuid4().hex, 'kind': 'creature', 'name': GOBLIN_NAMES[position],
+                             'location': location, 'life_state': 'alive', 'encounter_position': position}
+                    combat_ready(entry, 'minor')
+                    entities.append(entry)
+
+    # A named list of creatures is grounded when the narrator introduces the names
+    # alongside their common species and explicitly counts the opponents.
+    group = re.search(r'\b(?:три|трое|3)\s+(?:\w+\s+){0,2}(?:голем|гоблин|страж|скелет|волк|орк|дух|существа)\w*\b', clean, re.I)
+    if group:
+        names = re.findall(r'«(' + PERSON_NAME + r')»', clean[group.end():group.end() + 330])
+        if len(set(map(key, names))) == 3:
+            for name in dict.fromkeys(names):
+                if not any(entry.get('kind') == 'creature' and key(entry.get('location')) == key(location)
+                           and any(key(name) == key(alias) for alias in entity_names(entry)) for entry in entities):
+                    entry = {'id': uuid4().hex, 'kind': 'creature', 'name': name, 'location': location,
+                             'life_state': 'alive'}
+                    combat_ready(entry, 'minor')
+                    entities.append(entry)
     return entities
 
 
@@ -269,9 +340,10 @@ def world_context(state, query, limit=12, *, player_query=None):
 def npc_damage(state, result):
     """Resolve signed damage only against an explicitly bound existing creature/NPC."""
     check = (result or {}).get('check') or {}
-    if check.get('kind')!='damage' or check.get('effect') or not check.get('world_target_id'):
+    ranged = check.get('kind') == 'attack' and check.get('ammo') and result.get('success') is True
+    if not (ranged or check.get('kind') == 'damage') or check.get('effect') or not check.get('world_target_id'):
         return {}
-    total = result.get('total')
+    total = result.get('ranged_damage' if ranged else 'total')
     if type(total) is not int: return {}
     target = next((e for e in records(state) if e['id']==check['world_target_id']),None)
     if not target or life_state(target)!='alive' or type(target.get('hp')) is not int or type(target.get('max_hp')) is not int: return {}

@@ -14,7 +14,7 @@ PASSIVE_OBSERVATION = re.compile(
     r'(?:осматриваюсь|осмотреться|слушаю|прислушиваюсь|наблюдаю|смотрю)[.!?]?'
     r'|я внимательно осматриваюсь вокруг\. что я вижу\?'
 )
-HP_NUMBER = re.compile(r"(?<!\d)([1-9]\d{0,2})\s*(?:HP\s*)?(?:урон\w*|единиц\w*\s+урон\w*)", re.I)
+HP_NUMBER = re.compile(r"(?<![\w+−-])([1-9]\d{0,2})\s*(?:HP\s*)?(?:урон\w*|единиц\w*\s+урон\w*)", re.I)
 HIT_VERB = re.compile(r"\b(?:попада\w*|попал\w*|ударя\w*|нанос\w*|нан[её]с\w*|теря\w*|лишил\w*)\b", re.I)
 UNCERTAIN_HIT = re.compile(r"\b(?:если|может|могла?|мог бы|могут|бы|возможн\w*|прошл\w*|тогда|не)\b", re.I)
 MAX_ACTIVE = 40
@@ -107,6 +107,17 @@ def control_restriction(state, action, *, waiting=False):
             'Можно подождать с помощью /wait и дать миру возможность отреагировать.')
 
 
+def normalized_evidence(value):
+    return " ".join(re.sub(r"[*_`]", "", value).casefold().split())
+
+
+def descriptive_damage(value):
+    clean = normalized_evidence(value) if isinstance(value, str) else ""
+    return bool(re.search(r'\b\d+d\d+(?:\s*[+−-]\s*\d+)?\b', clean)
+                and not HP_NUMBER.search(clean))
+
+
+
 def damage_from_story(state, action, reply):
     """Recover clearly stated, realized hero damage from a missing model delta."""
     if re.search(r'\b(?:напомни\w*|перескаж\w*|сверя\w*|вспомина\w*)\b', action, re.I):
@@ -126,7 +137,7 @@ def damage_from_story(state, action, reply):
             bound = not UNCERTAIN_HIT.search(clean)
         elif not (clean.startswith('-') or clean.startswith('–')):
             bound = False
-        if not bound or not HIT_VERB.search(clean) or UNCERTAIN_HIT.search(clean):
+        if not bound or not HIT_VERB.search(clean) or UNCERTAIN_HIT.search(clean) or descriptive_damage(clean):
             continue
         amounts = HP_NUMBER.findall(clean)
         if len(amounts) == 1 and int(amounts[0]) <= 300:
@@ -153,9 +164,10 @@ def complete_hero_damage(state, action, reply, proposals):
         return proposals
     matched = set()
     for entry in damage:
-        evidence = text(entry.get("evidence"), 600)
+        evidence = normalized_evidence(text(entry.get("evidence"), 600))
         hits = [i for i, effect in enumerate(recovered)
-                if evidence and (evidence in effect["evidence"] or effect["evidence"] in evidence)]
+                if evidence and (evidence in normalized_evidence(effect["evidence"])
+                                 or normalized_evidence(effect["evidence"]) in evidence)]
         if len(hits) != 1 or entry.get("amount") != recovered[hits[0]]["amount"]:
             return proposals
         matched.add(hits[0])
@@ -169,9 +181,9 @@ def grounded_effect_evidence(value, reply):
     phrase = text(value, 600)
     if len(phrase) < 5:
         return False
-    strip = lambda source: " ".join(re.sub(r"[*_`]", "", source).split())
-    normalized = strip(phrase)
-    return len(normalized) >= 5 and normalized in strip(reply)
+    normalized = normalized_evidence(phrase)
+    return len(normalized) >= 5 and normalized in normalized_evidence(reply)
+
 
 def _apply(state, p, minute, evidence, blocked_hp):
     typ=p.get('type'); need(isinstance(typ,str) and typ in LABELS,'Неизвестный тип эффекта')
@@ -301,13 +313,15 @@ def resolve_effects(state, proposals, reply, minute, blocked_hp=(), hero_before=
             trial=deepcopy(state)
             hp_targets=set()
             typ=p.get('type')
+            if typ == 'damage':
+                need(not descriptive_damage(evidence), 'Формула способности не является состоявшимся уроном')
             p=dict(p)
             for field in ('target','recipient','destination'):
                 if field in p: p[field]=resolve_ref(trial,p[field])
             if typ in ('damage','heal') and isinstance(p.get('target'),str): hp_targets.add(p['target'])
             if typ=='drain' and p.get('resource')=='hp': hp_targets.update(v for v in (p.get('target'),p.get('recipient')) if isinstance(v,str))
             # Separate hits need separate snippets of narration, even with equal damage.
-            hp_event = (typ, tuple(sorted(hp_targets)), ' '.join(evidence.casefold().split()))
+            hp_event = (typ, tuple(sorted(hp_targets)), normalized_evidence(evidence))
             if hp_targets:
                 need(hp_event not in applied_hp_events, 'Повтор события изменения HP')
             if 'hero' in hp_targets and hero_before is not None and not hero_replaced and 'hero' not in blocked:

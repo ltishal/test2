@@ -6,7 +6,7 @@ from uuid import uuid4
 COINS = {"gold": ("зм", 100), "silver": ("см", 10), "copper": ("мм", 1)}
 LIMIT = 1_000_000
 WORDS = {"одну": 1, "одна": 1, "одной": 1, "один": 1,
-         "две": 2, "два": 2, "три": 3, "пять": 5, "десять": 10, "сто": 100}
+         "две": 2, "два": 2, "три": 3, "четыре": 4, "пять": 5, "десять": 10, "сто": 100}
 COUNT = r"(?:[1-9][0-9]{0,5}|" + "|".join(WORDS) + ")"
 COIN_PHRASE = re.compile(
     rf"\b({COUNT})\s+(золот\w*|серебрян\w*|медн\w*|зм|см|мм)\b", re.I
@@ -87,7 +87,10 @@ def offers_from_story(reply):
         if not price or len(name.split()) > 6 or re.search(r"\b(?:если|может|не|доступно|нужно)\b", name, re.I):
             continue
         tail = clean[match.end():match.end()+125]
-        stock_match = re.search(r"в наличии\s+([^.!?;]{1,36})", tail, re.I)
+        stock_match = re.match(
+            r'^[»" ,;]*(?:[.!?]\s*)?(?:(?:торговец|продавец|он|она)\s+подтверждает,?\s+что\s+)?'
+            r'(?:в наличии|у него есть|у не[её] есть|осталось)\s+([^.!?;]{1,48})', tail, re.I
+        )
         stock = stated_stock(stock_match[1]) if stock_match else None
         evidence = clean[match.start():match.end() + (stock_match.end() if stock_match else 0)].strip(' «»":')
         currency, amount = price[0]
@@ -96,19 +99,29 @@ def offers_from_story(reply):
     return quotes[:6]
 
 
+PURCHASE_CANCELLED = re.compile(
+    r'\b(?:покупка\s+не\s+состоялась|сделка\s+(?:не\s+состоялась|отменена)|'
+    r'ты\s+отказываешься|отказ(?:ался|алась|ываюсь)\s+от\s+покупки|'
+    r'не\s+(?:покупаешь|покупаю|купил[аи]?))\b', re.I
+)
+PURCHASE_COMPLETE = re.compile(
+    r'\b(?:покупк\w* состоял\w*|сделка состоял\w*|покупа(?:ешь|ет|ю)|'
+    r'купил[аи]?|отда[лёт][аи]?|отдал[аи]?|переда(?:л[аи]?|[её]т)|'
+    r'оплатил[аи]?|продал[аи]?|принима\w* монет\w*)\b', re.I
+)
+
+
 def confirmed_purchase(proposal, reply):
-    if not isinstance(proposal, dict):
+    if not isinstance(proposal, dict) or PURCHASE_CANCELLED.search(reply):
         return None
-    if trade_evidence(proposal, reply, quantity=proposal.get('quantity', 1) if type(proposal.get('quantity')) is int else 1):
-        return proposal
-    name = trade_key(proposal.get('item'))
-    if not name or not re.search(r"покупк\w* состоял|\b(?:покупа\w*|принима\w* монет|переда\w* па[её]к|прода\w*)\b", reply, re.I):
+    if not PURCHASE_COMPLETE.search(reply):
         return None
-    for sentence in re.split(r"(?<=[.!?])\s+|\n+", reply):
-        candidate = {**proposal, 'evidence': sentence}
-        if trade_evidence(candidate, reply, quantity=proposal.get('quantity', 1) if type(proposal.get('quantity')) is int else 1):
-            return candidate
-    return None
+    quantity = proposal.get('quantity', 1)
+    quantity = quantity if type(quantity) is int else 1
+    candidates = [proposal, *({**proposal, 'evidence': sentence}
+                              for sentence in re.split(r'(?<=[.!?])\s+|\n+', reply))]
+    return next((candidate for candidate in candidates
+                 if trade_evidence(candidate, reply, quantity=quantity)), None)
 
 
 def settle_offer(state, offer, quantity):
@@ -189,7 +202,7 @@ def exchange_from_story(action, reply):
     return {"from": source, "to": target, "amount": quantity}
 
 
-def current_offers(state):
+def current_offers(state, *, include_sold_out=False):
     scene = state.get("scene")
     location = trade_key(scene.get("location")) if isinstance(scene, dict) else ""
     raw = state.get("shop_offers")
@@ -200,7 +213,9 @@ def current_offers(state):
     return [offer for offer in raw if isinstance(offer, dict)
             and trade_key(offer.get("location")) == location and trade_key(offer.get("item"))
             and isinstance(offer.get("currency"), str) and offer["currency"] in COINS
-            and amount(offer.get("price")) and amount(offer.get("stock",1))
+            and amount(offer.get("price"))
+            and (amount(offer.get("stock",1)) or
+                 include_sold_out and type(offer.get("stock")) is int and offer["stock"] == 0)
             and (not offer.get('seller_id') or (isinstance(offer.get('seller_id'),str) and offer['seller_id'] in local_sellers))][:20]
 
 
@@ -210,9 +225,10 @@ def merge_offers(state, proposed, reply):
     location = scene.get("location") if isinstance(scene, dict) else ""
     if not trade_key(location):
         return offers
+    inferred = offers_from_story(reply)
     proposals = proposed[:10] if isinstance(proposed, list) else []
     accepted = set()
-    for quote in [*proposals, *offers_from_story(reply)]:
+    for quote in [*proposals, *inferred]:
         if not trade_evidence(quote, reply):
             continue
         name, coin, price = (quote.get(k) for k in ("item", "currency", "price"))
@@ -225,7 +241,15 @@ def merge_offers(state, proposed, reply):
             from engine.world import records, life_state
             seller=next((e for e in records(state) if e['id']==seller_id and e.get('kind')=='npc' and life_state(e)=='alive' and trade_key(e.get('location'))==trade_key(location)),None)
             if not seller or trade_key(seller['name']) not in trade_key(quote['evidence']): continue
-        stock=quote.get('stock',1)
+        stock = quote.get('stock', 1)
+        if not stated_stock(quote['evidence']):
+            corroboration = [extra for extra in inferred if extra['stock_explicit']
+                             and extra['price'] == price and extra['currency'] == coin
+                             and trade_key(extra['item']) == trade_key(name)
+                             and proof_text(quote['evidence']) in proof_text(extra['evidence'])]
+            if len(corroboration) == 1:
+                stock = corroboration[0]['stock']
+                quote = {**quote, 'evidence': corroboration[0]['evidence'], 'stock_explicit': True}
         if type(stock) is not int or not 1<=stock<=99: continue
         if stock>1 and stated_stock(quote['evidence']) != stock: continue
         identity = (trade_key(location), trade_key(name),seller_id)
@@ -235,7 +259,8 @@ def merge_offers(state, proposed, reply):
             continue
         previous = next((old for old in offers if (trade_key(old.get("location")), trade_key(old.get("item")),
                                                    old.get("seller_id")) == identity), None)
-        if previous and not quote.get('stock_explicit') and not stated_stock(quote['evidence']):
+        if previous and not quote.get('stock_explicit') and not re.search(
+                r"\b(?:в наличии|есть|остал\w*|поступил\w*|запас)\b", quote['evidence'], re.I):
             stock = previous.get('stock', stock)
         offers = [old for old in offers if (trade_key(old.get("location")), trade_key(old.get("item")),old.get("seller_id")) != identity]
         offers.append({"location": location, "item": name.strip(), "currency": coin, "price": price,

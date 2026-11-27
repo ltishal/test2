@@ -36,27 +36,29 @@ from campaign import (
 )
 
 from engine.clock import advance_action
-from engine.equipment import item_spec, equipment_spec
+from engine.equipment import (item_spec, equipment_spec, ammo_kind, ammo_available,
+                              require_ammo, consume_ammo)
 from engine.api_budget import ApiBudget, BudgetExceeded, estimated_units
 from engine.constructor import (CONSTRUCTOR_PROMPT, TYPES, apply_blueprints, apply_character_blueprints, recipe_matches,
                                 attach_item_blueprints, attach_learned_spell, constructor_context,
                                 learn_blueprint, learned_spell_from_story, recipes)
 from engine.turn_protocol import DeltaStream, PROTOCOL_PROMPT, validate_delta
 from engine.world import (WORLD_PROMPT, world_context, merge_entities, npc_damage,
-                          bind_damage_target, apply_npc_damage, combat_ready, sync_life, restore_scene_people)
+                          bind_damage_target, apply_npc_damage, combat_ready, sync_life, restore_scene_people,
+                          entity_names, life_state)
 
 from engine.effects import (EFFECT_PROMPT, PASSIVE_OBSERVATION, resolve_effects, effect_context, check_bonus,
-                            complete_hero_damage, control_restriction, hero_incapacitated, STATS)
+                            complete_hero_damage, control_restriction, hero_incapacitated, STATS, descriptive_damage)
 from engine.combat import (ARMOR, COMBAT_PROMPT, WEAPONS, combat_context, combat_turn, hero_defense, narrated_attacker,
-                           profile, safe_ability)
+                           profile, safe_ability, narrated_weapon, narrated_ranged_check, adjust_damage, SHOT_EVENT)
 from engine.economy import (TRADE_PROMPT, COINS, apply_exchange, apply_purchase, current_offers,
-                            confirmed_purchase, exchange_from_story, merge_offers, trade_key, wallet_text, settle_offer)
+                            confirmed_purchase, exchange_from_story, merge_offers, trade_key, wallet_text, settle_offer, PURCHASE_CANCELLED)
 
 from party_store import PartyConflict, PartyMissing, PartyStore
 from token_usage import TokenUsage, state_turn_id
 
 BASE_DIR = Path(__file__).resolve().parent
-APP_REVISION = "2026-11-27.world-alpha4"
+APP_REVISION = "2026-11-27.world-alpha4.1"
 QWEN_SUMMARY_LIMIT = 480
 QWEN_STATE_LIMIT = 1100
 QWEN_STATE_SETUP_LIMIT = 2200
@@ -630,6 +632,7 @@ STATE_EXTRACT_PROMPT = """
 При покупке верни purchase: {item,quantity,currency,price,evidence}, где item — точное название, quantity — число полученных предметов, currency — gold, silver или copper, price — общая цена, evidence — цитата новой подтверждённой покупки. Для покупки используй только purchase, не возвращай отдельные изменения кошелька или инвентаря.
 
 Обнови лист RPG по последнему ходу. Верни строго JSON только изменённых полей, {} при отсутствии изменений.
+Для выстрела из лука или арбалета объявляй один /roll на попадание и указывай точную цель из сцены. Для этого выстрела сервер фиксирует результат, урон и один боеприпас. Если есть ranged_result, следуй ему и npc_rule_effect. Не объявляй отдельный бросок урона для этого уже разрешённого выстрела и не меняй количество его боеприпасов в дельте.
 Меняй состояние только по новому результату в последней реплике мастера. Предыдущие реплики и пересказ старых событий служат контекстом. Лист уже учитывает прошлые удары, лечение, покупки и расходы. Изменяй кошелёк и инвентарь лишь при реальном новом обмене, расходе или находке. Пересказ, проверка числа, предложения и суммы до прошлого обмена ничего не меняют. Для существующего героя верни hp_delta (отрицательный урон или положительное лечение) только за новый результат, и hp_event: короткая дословная фраза из последнего ответа, где этот урон или лечение произошли, а не где обсуждается итоговое здоровье. На запросе броска, сверке или пересказе не возвращай hp_delta. При создании используй hp и max_hp. Для изменений инвентаря или монет у существующего героя верни resource_events: {"inventory":"дословная фраза нового получения, траты или передачи", "wallet":"дословная фраза новой оплаты"}. Укажи только затронутые группы. Цифры в пересказе или сверке не являются событиями. xp, xp_next, level, level_pending, xp_event_ids считает сервер.
 Имя, раса, класс и предыстория меняются только по событию. Поля: name, race, class, background, hp, max_hp, gold, silver, copper, stats {str,dex,con,int,wis,cha}. HP не выше max_hp. Базовые характеристики, владения, навыки и умения назначай при создании, беря их из блока [[ЛИСТ]]: строка «📊» — характеристики, «❤️» — hp, уровень, опыт и кошелёк, «🛡» — владения, «🗣» — языки, «🎯» — навыки с суммарным бонусом, «⚡» — активные умения с uses_max, uses_left и recharge (short_rest, long_rest или day), «🌀» — пассивные и постоянные эффекты с recharge passive и без uses_max, «🎒» — инвентарь. Значки и метки [[ЛИСТ]] в лист не переноси. Название умения бери из блока как есть, включая числовой эффект. Инвентарь, кошелёк и характеристики из блока переноси сразу, в том же ходе. Навык {name,bonus,source}; умение {name,description,uses_max,uses_left,recharge}. Трать применения по событию и восстанавливай по отдыху. Для Дыхания дракона спиши одно применение после разрешения урона, а не пока мастер ждёт бросок. Сохраняй полное описание эффекта при изменении только зарядов. Активное умение «без ограничений» передавай с recharge: "unlimited", без uses_max и uses_left. Пассивный эффект передавай с recharge: "passive". Не используй отрицательные заряды, Markdown и HTML-сущности в названии.
 Для передачи физической вещи из инвентаря персонажа используй item_transfers: [{id,quantity,holder,evidence}]. id — точный ID из инвентаря, holder — имя получателя, evidence — цитата о состоявшейся передаче в этой реплике. Не используй одновременно inventory_remove для той же передачи.
@@ -1599,6 +1602,20 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
         minute = plan["until"]
     else:
         minute = advance_clock(minute, latest, elapsed, clock_end, previous_check, resolved_previous, grounded)
+    rest_event = new_state.pop("rest_event", None)
+    rest = (rest_event.get("kind") if isinstance(rest_event, dict)
+            and grounded(rest_event.get("evidence")) else "")
+    completed_rest = (
+        not new_character and not plan and not previous_check
+        and not re.search(r"\b(?:не|если|напомни\w*|перескаж\w*)\b", action, re.I)
+        and re.search(r"\b(?:отдых\w*|отдыха\w*|сплю|ложусь|спим)\b", action, re.I)
+        and re.search(r"\b(?:отдых\s+заверш[её]н|ты\s+выспал[асься]+|ты\s+закончил[аи]? отдых)\b", latest, re.I)
+        and re.search(r"\b(?:8|восемь)\s+часов\b", latest, re.I)
+    )
+    if completed_rest:
+        rest = "long_rest"
+        if previous_minute is not None and minute == previous_minute:
+            minute += 480
     if minute is not None:
         new_state["world_minute"] = minute
         campaign_scene["time"] = clock_label(minute)
@@ -1619,14 +1636,22 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
         new_state.pop(field, None)
     world_patches = new_state.pop("world_entities", None)
     entities = merge_entities({**current, "scene": campaign_scene}, world_patches, latest)
-    restore_scene_people(entities, campaign_scene, latest, current.get("scene"))
+    restore_scene_people(entities, campaign_scene, latest, current.get("scene"),
+                         new_state.get("name") if new_character else current.get("name"))
     npc_outcome = npc_damage(current, result)
-    new_state["world_entities"] = apply_npc_damage(entities, npc_outcome)
     proposed = new_state.pop("pending_check", None)
     cancellation = new_state.pop("cancel_check", None)
     cancel_check = (isinstance(cancellation, dict) and grounded(cancellation.get("evidence")))
+    resolved_check = (result.get("check") or {}) if result else {}
+    resolved_ammo = resolved_check.get("ammo")
+    shot_weapon = narrated_weapon(current, action) if not new_character and not previous_check and not result else None
+    ranged_check = narrated_ranged_check(
+        {**current, "world_entities": entities, "scene": campaign_scene},
+        shot_weapon, action, latest, proposed)
     attacker = narrated_attacker(entities, proposed, latest)
-    if attacker and (not proposed or isinstance(proposed, dict) and proposed.get("kind") in (None, "attack")):
+    if ranged_check:
+        next_check = ranged_check
+    elif attacker and (not proposed or isinstance(proposed, dict) and proposed.get("kind") in (None, "attack")):
         proposed = {**(proposed or {}), "kind": "attack", "title": f"Атака: {attacker['name']}",
                     "target": current.get("name", "Герой")}
         next_check = pending_check(latest, proposed, campaign_scene, defense_dc=hero_defense(current))
@@ -1640,6 +1665,8 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
                 next_check["practice"] = practice
     else:
         next_check = pending_check(latest, proposed, campaign_scene)
+    if resolved_ammo and next_check and next_check.get("kind") == "damage" and not next_check.get("effect"):
+        next_check = None
     previous_scene = current.get("scene")
     previous_location = previous_scene.get("location") if isinstance(previous_scene, dict) else None
     moved = bool(previous_location and previous_location != campaign_scene.get("location"))
@@ -1650,6 +1677,22 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
         )
         if not optional or not (moved or cancel_check or replacement):
             next_check = previous_check
+    ranged_target = (ranged_check or resolved_check).get("world_target_id") if ranged_check or resolved_ammo else None
+    protected_target = next((entry for entry in entities if entry["id"] == ranged_target), None)
+    if protected_target:
+        existing_target = next((entry for entry in current.get("world_entities", [])
+                                if isinstance(entry, dict) and entry.get("id") == ranged_target), None)
+        # A model patch may describe a death before the signed throw has resolved.
+        if existing_target and life_state(existing_target) == "alive" and not (
+                npc_outcome and npc_outcome["hp_after"] == 0):
+            protected_target["life_state"] = "alive"
+            if "status" in existing_target:
+                protected_target["status"] = existing_target["status"]
+            else:
+                protected_target.pop("status", None)
+            if type(existing_target.get("hp")) is int:
+                protected_target["hp"] = existing_target["hp"]
+    new_state["world_entities"] = apply_npc_damage(entities, npc_outcome)
     if next_check and next_check is not previous_check:
         bind_damage_target({"world_entities": entities}, next_check, proposed)
         if last_event_id:
@@ -1662,14 +1705,9 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
         new_state.setdefault("cover", "нет")
     new_state["scene"] = campaign_scene
     new_state["facts"] = campaign_facts
-    rest_event = new_state.pop("rest_event", None)
     ability_event = new_state.pop("ability_event", None)
-    rest = (rest_event.get("kind") if isinstance(rest_event, dict)
-            and _grounded_event(rest_event.get("evidence"), latest) else "")
     used_ability = (ability_event.get("name") if isinstance(ability_event, dict)
                     and _grounded_event(ability_event.get("evidence"), latest) else "")
-    resolved_check = result.get("check", {}) if result else {}
-    resolved_check = resolved_check or {}
     if resolved_check.get("kind") == "damage" and resolved_check.get("ability") == "Дыхание дракона":
         used_ability = "Дыхание дракона"
     if (next_check and next_check != previous_check and next_check.get("kind") == "heal"
@@ -1708,6 +1746,20 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
             current["mana"] = current["max_mana"]
 
     transfers = new_state.pop("item_transfers", None)
+    owned_ammo = resolved_ammo or (shot_weapon or {}).get("ammo")
+    ammo_log = []
+    if resolved_ammo or (shot_weapon and not next_check and SHOT_EVENT.search(latest)
+                         and not re.search(r"\bне\s+(?:стреляешь|выпускаешь|выстреливаешь)\b", latest, re.I)):
+        ammo_log.append(consume_ammo(current, owned_ammo))
+    if owned_ammo:
+        for field in ("inventory", "inventory_remove"):
+            if isinstance(new_state.get(field), list):
+                new_state[field] = [item for item in new_state[field] if ammo_kind(item) != owned_ammo]
+        if isinstance(transfers, list):
+            ammo_ids = {item.get("id") for item in current.get("inventory", [])
+                        if isinstance(item, dict) and ammo_kind(item) == owned_ammo}
+            transfers = [item for item in transfers if ammo_kind(item) != owned_ammo
+                         and (not isinstance(item, dict) or item.get("id") not in ammo_ids)]
     if transfers and not new_character:
         current["inventory"], transfer_facts = _transfer_items(
             _inventory_with_ids(current.get("inventory")), transfers, latest,
@@ -1745,7 +1797,7 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
                 purchase = confirmed_purchase(purchase, latest)
                 if not purchase:
                     raise ValueError("Покупку не удалось подтвердить по этому ходу.")
-                candidates = [offer for offer in current_offers({**current, "scene": campaign_scene, "world_entities": entities})
+                candidates = [offer for offer in current_offers({**current, "scene": campaign_scene, "world_entities": entities}, include_sold_out=True)
                               if trade_key(offer["item"]) == trade_key(purchase.get("item"))
                               and (not purchase.get("seller_id") or offer.get("seller_id")==purchase.get("seller_id"))]
                 if len(candidates)>1: raise ValueError("Уточните продавца.")
@@ -1768,7 +1820,10 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
             ("inventory", ("inventory", "inventory_remove")),
             ("wallet", ("gold", "silver", "copper")),
         ):
-            if not _grounded_event(resources.get(group), latest):
+            evidence = resources.get(group)
+            cancelled = PURCHASE_CANCELLED.search(latest) and isinstance(evidence, str) and re.search(
+                r"покуп|прод|па[её]к|серебрян|золот|медн|цен|плат", evidence, re.I)
+            if cancelled or not _grounded_event(evidence, latest):
                 for field in fields:
                     new_state.pop(field, None)
     inventory = current.get("inventory")
@@ -1903,7 +1958,8 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
         elif rest == "long_rest" and before > 0:
             merged["hp"] = current.get("max_hp", DEFAULT_STATE["max_hp"])
         else:
-            merged["hp"] = before + delta if type(delta) is int and grounded else before
+            merged["hp"] = before + delta if type(delta) is int and grounded and not (
+                delta < 0 and descriptive_damage(evidence)) else before
         merged["max_hp"] = current.get("max_hp", DEFAULT_STATE["max_hp"])
     merged["hp"] = max(0, min(int(merged.get("hp", 0) or 0), int(merged.get("max_hp", 1) or 1)))
     previous_level = max(1, int(current.get("level", 1) or 1))
@@ -1936,7 +1992,7 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
             if spec: item['mechanics']=spec
             else: item.pop('mechanics',None)
     merged["notes"] = [n for n in (normalize_note(x) for x in merged["notes"]) if n]
-    proposed_spells = learned_spell_from_story(latest)
+    proposed_spells = learned_spell_from_story(latest, merged.get("name"))
     blueprints = blueprint_proposals if isinstance(blueprint_proposals, list) else []
     design_log = apply_blueprints(merged, [*blueprints, *proposed_spells], latest)
     attach_learned_spell(merged, proposed_spells)
@@ -1947,8 +2003,21 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
     else:
         blocked = set()
         if rules_result(current, result): blocked.add("hero")
-        if npc_outcome: blocked.add(npc_outcome["id"])
+        if npc_outcome:
+            blocked.add(npc_outcome["id"])
+        elif resolved_ammo and resolved_check.get("world_target_id"):
+            blocked.add(resolved_check["world_target_id"])
+        elif ranged_check:
+            blocked.add(ranged_check["world_target_id"])
         effect_proposals = effect_proposals if isinstance(effect_proposals, list) else []
+        if protected_target:
+            names = set(entity_names(protected_target))
+            effect_proposals = [effect for effect in effect_proposals if not (
+                isinstance(effect, dict) and effect.get("type") == "damage"
+                and ((effect.get("target") == ranged_target)
+                     or (isinstance(effect.get("target"), str) and effect["target"] in names)
+                     or (isinstance(effect.get("target"), dict) and isinstance(effect["target"].get("name"), str)
+                         and effect["target"]["name"] in names)))]
         if "hero" not in blocked:
             effect_proposals = complete_hero_damage(current, action, latest, effect_proposals)
         hp_base = merged["hp"] if rest == "long_rest" else current["hp"]
@@ -1961,12 +2030,12 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
             merged['effect_log']=logs+merged['effect_log']
         for entity in merged.get('world_entities',[]):
             if isinstance(entity,dict): sync_life(entity)
-        merged["effect_log"].extend(trade_log)
+        merged["effect_log"].extend([*ammo_log, *trade_log])
         merged["combat"] = combat_context(merged)
         check = merged.get("pending_check")
         if check and check.get("kind") != "save" and hero_incapacitated(merged):
             merged["pending_check"] = check = None
-        if check and check.get("id") != (previous_check or {}).get("id") and isinstance(proposed, dict):
+        if check and not check.get("ammo") and check.get("id") != (previous_check or {}).get("id") and isinstance(proposed, dict):
             stat = proposed.get("stat")
             if isinstance(stat, str) and stat in STATS and check.get("kind") in ("check", "attack", "save"):
                 check["stat"] = stat
@@ -2252,6 +2321,16 @@ def api_roll():
             if attacker:
                 roll["npc_attack_damage"] = roll_dice(profile(attacker)["dice"])["total"]
                 result = roll_result(check, roll)
+        if check and check.get("ammo"):
+            require_ammo(state, check["ammo"])
+        if check and check.get("ammo") and result.get("success"):
+            target = next((entry for entry in state.get("world_entities", [])
+                           if isinstance(entry, dict) and entry.get("id") == check.get("world_target_id")), None)
+            if not target:
+                raise ValueError("Цель выстрела больше недоступна.")
+            damage = roll_dice(check["ranged_dice"])["total"]
+            roll["ranged_damage"] = adjust_damage(damage, check["ranged_element"], profile(target)["resistances"])
+            result = roll_result(check, roll)
         result["receipt"] = ROLL_SIGNER.dumps(roll)
         return jsonify(result)
     except ValueError as e:
@@ -2347,6 +2426,10 @@ def api_chat():
         plan = wait_plan(game_state, query)
         if plan and check and not (hero_incapacitated(game_state) and check.get("kind") != "save"):
             raise ValueError("Сначала разрешите или отмените ожидающий бросок.")
+        if check and check.get("ammo") and not result:
+            raise ValueError(f"Сначала разрешите ожидающий выстрел броском {check['expr']}.")
+        if not setup_turn and not result and not check and (ranged_weapon := narrated_weapon(game_state, query)):
+            require_ammo(game_state, ranged_weapon["ammo"])
         restriction = control_restriction(
             game_state, query,
             waiting=bool(plan) or bool(result and (result.get("check") or {}).get("kind") == "save"),
@@ -2404,6 +2487,9 @@ def api_chat():
         state_context["roll_result"] = result
         state_context["rule_effect"] = rules_result(game_state, result)
         state_context["npc_rule_effect"] = npc_damage(game_state, result)
+        if (result.get("check") or {}).get("ammo"):
+            kind = result["check"]["ammo"]
+            state_context["ranged_result"] = {"hit": result["success"], "ammo_remaining": ammo_available(game_state, kind) - 1}
     elif check:
         state_context["pending_check"] = check
     if not result and query.startswith("[[БРОСОК]]"):
@@ -2744,6 +2830,19 @@ def _commit_party_turn(data):
         location = (updated.get("scene") or {}).get("location")
         if location:
             reply["content"] += f" Текущее место: {location}."
+    if ((roll or {}).get("check") or {}).get("ammo"):
+        target = roll["check"].get("target", "цель")
+        verdict = "попадание" if roll.get("success") else "промах"
+        details.append(f"Выстрел по цели «{target}» — {verdict}.")
+        if not next_check:
+            announced = pending_check(reply["content"])
+            if announced and announced["kind"] == "damage" and not announced.get("effect"):
+                reply["content"] = check_instructions_in_card(reply["content"], announced)
+                reply["content"] = re.sub(r"(?:Теперь\s+)?брось(?:те)?\s+урон\s*[:.]?\s*$",
+                                          "", reply["content"], flags=re.I).rstrip()
+            else:
+                reply["content"] = check_instructions_in_card(
+                    reply["content"], {"expr": roll["check"].get("ranged_dice", "")})
     if next_check and next_check.get("id") != (prior_check or {}).get("id"):
         reply["content"] = check_instructions_in_card(reply["content"], next_check)
     if reply["content"] != draft["reply"]["content"]:

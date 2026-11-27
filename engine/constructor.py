@@ -11,7 +11,12 @@ TYPES = {'item': 'Предмет', 'race': 'Раса', 'class': 'Класс',
          'spell': 'Заклинание', 'ability': 'Способность'}
 STATS = ('str', 'dex', 'con', 'int', 'wis', 'cha')
 RECIPE_LIMIT = 180
-LEARNED_SPELL = re.compile(r'\b(?:изучил[аи]?|освоил[аи]?)\s+[«"]([^»"\n]{3,100})[»"]', re.I)
+LEARNED_SPELL = re.compile(
+    r'\b(?:изучил[аи]?|освоил[аи]?|изучает|осваивает)\s+[*_`]*[«"]([^»"\n]{3,100})[»"][*_`]*', re.I
+)
+NUMBER_WORDS = {'одна': 1, 'одну': 1, 'один': 1, 'две': 2, 'два': 2, 'три': 3,
+                'четыре': 4, 'пять': 5, 'шесть': 6, 'семь': 7, 'восемь': 8}
+NUMBER_TEXT = r'(?:[0-9]{1,2}|' + '|'.join(NUMBER_WORDS) + ')'
 ELEMENT_NAMES = {'огн': 'fire', 'холод': 'cold', 'молни': 'lightning', 'ядом': 'poison',
                  'магией': 'arcane', 'светом': 'radiant', 'тьмой': 'shadow', 'физическ': 'physical'}
 
@@ -87,10 +92,11 @@ def apply_blueprints(state, proposals, reply):
             continue
         try:
             recipe = validate_blueprint(proposal, level)
-            if key(recipe['name']) not in key(evidence):
+            quoted = re.findall(r'[«"]([^»"\n]{3,100})[»"]', evidence)
+            if key(recipe['name']) not in key(evidence) and not any(names_match(recipe['name'], name) for name in quoted):
                 raise ValueError('Название проекта отсутствует в подтверждённой фразе.')
             existing = next((entry for entry in catalog if entry['kind'] == recipe['kind']
-                             and key(entry['name']) == key(recipe['name'])), None)
+                             and names_match(entry['name'], recipe['name'])), None)
             if existing:
                 continue
             if len(catalog) >= RECIPE_LIMIT:
@@ -164,34 +170,36 @@ def attach_item_blueprints(state):
     state['inventory'] = changed
 
 
-def learned_spell_from_story(reply):
-    """Recover a learned spell only when the reply states the actual formula and cost."""
-    plain = re.sub(r'[*_`]', '', reply)
-    match = LEARNED_SPELL.search(plain)
-    if not match:
-        return []
-    prefix = plain[max(0, match.start() - 18):match.start()]
-    if re.search(r'\b(?:не|если|бы)\s*$', prefix, re.I):
-        return []
-    tail = plain[match.end():match.end()+220]
-    dice = re.search(r'\b([1-6]d[0-9]{1,2}(?:[+-][0-9]{1,2})?)\s+([а-яё]+)', tail, re.I)
-    mana = re.search(r'\b([0-9]{1,2})\s+(?:единиц\w*\s+)?ман[ыуа]\b', tail, re.I)
-    if not dice or not mana:
-        return []
-    element = next((kind for stem, kind in ELEMENT_NAMES.items() if dice[2].casefold().startswith(stem)), None)
-    if not element:
-        return []
-    cooldown = re.search(r'\b(?:восстановление|перезарядка)\s*[:—–-]?\s*([0-8]|один|два|три)\s+раунд', tail, re.I)
-    value = cooldown[1].casefold() if cooldown else '0'
-    wait = int(value) if value.isdigit() else {'один': 1, 'два': 2, 'три': 3}[value]
-    name = match[1]
-    original = re.search(r'\b(?:изучил[аи]?|освоил[аи]?)\s+[*_`]*[«"]'
-                         + re.escape(name) + r'[»"][*_`]*', reply, re.I)
-    if not original:
-        return []
-    return [{'kind': 'spell', 'name': name, 'description': 'Изучено в ходе приключения.',
-             'mechanics': {'dice': dice[1], 'element': element, 'cost': int(mana[1]), 'cooldown': wait},
-             'evidence': original[0]}]
+def learned_spell_from_story(reply, hero_name=None):
+    """Recover a completed lesson with an explicit hero, formula and cost."""
+    heroes = ['ты']
+    if key(hero_name):
+        heroes.append(re.escape(key(hero_name)))
+    subject = re.compile(r'(?:^|\s)(?:' + '|'.join(heroes) + r')\b', re.I)
+    learned = []
+    for match in LEARNED_SPELL.finditer(reply):
+        prefix = re.split(r'[.!?;:\n«»"—]', reply[:match.start()])[-1]
+        prefix = re.sub(r'[*_`]', '', prefix).casefold().replace('ё', 'е').strip()
+        if not subject.match(prefix) or re.search(r'\b(?:не|если|бы|мож\w*|говор\w*|сказ\w*)\b', prefix, re.I):
+            continue
+        tail = re.split(r'[.!?\n]', reply[match.end():match.end()+220].lstrip(' :—–'), 1)[0]
+        tail = re.sub(r'[*_`]', '', tail)
+        dice = re.search(r'\b([1-6]d[0-9]{1,2}(?:[+-][0-9]{1,2})?)\s+(?:урона\s+)?([а-яё]+)', tail, re.I)
+        mana = re.search(rf'\b({NUMBER_TEXT})\s+(?:единиц\w*\s+)?ман[ыуа]\b', tail, re.I)
+        if not dice or not mana:
+            continue
+        element = next((kind for stem, kind in ELEMENT_NAMES.items() if dice[2].casefold().startswith(stem)), None)
+        if not element:
+            continue
+        cooldown = re.search(rf'\b(?:восстановление|перезарядка|перезаряжается за)\s*[:—–-]?\s*({NUMBER_TEXT})\s+раунд', tail, re.I)
+        cost = mana[1].casefold()
+        wait = cooldown[1].casefold() if cooldown else '0'
+        learned.append({'kind': 'spell', 'name': match[1], 'description': 'Изучено в ходе приключения.',
+                        'mechanics': {'dice': dice[1], 'element': element,
+                                      'cost': int(cost) if cost.isdigit() else NUMBER_WORDS[cost],
+                                      'cooldown': int(wait) if wait.isdigit() else NUMBER_WORDS[wait]},
+                        'evidence': match[0]})
+    return learned
 
 
 def attach_learned_spell(state, proposals):
