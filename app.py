@@ -35,22 +35,25 @@ from campaign import (
     CANCEL_CHECK_COMMAND, CANCEL_CHECK_REPLY, check_instructions_in_card,
 )
 
+from engine.clock import advance_action
+from engine.equipment import item_spec, equipment_spec
+from engine.api_budget import ApiBudget, BudgetExceeded, estimated_units
 from engine.turn_protocol import DeltaStream, PROTOCOL_PROMPT, validate_delta
 from engine.world import (WORLD_PROMPT, world_context, merge_entities, npc_damage,
-                          bind_damage_target, apply_npc_damage, combat_ready)
+                          bind_damage_target, apply_npc_damage, combat_ready, sync_life)
 
 from engine.effects import (EFFECT_PROMPT, PASSIVE_OBSERVATION, resolve_effects, effect_context, check_bonus,
                             complete_hero_damage, control_restriction, hero_incapacitated, STATS)
 from engine.combat import (ARMOR, COMBAT_PROMPT, WEAPONS, combat_context, combat_turn, hero_defense, narrated_attacker,
                            profile, safe_ability)
 from engine.economy import (TRADE_PROMPT, COINS, apply_exchange, apply_purchase, current_offers,
-                            exchange_from_story, merge_offers, trade_key, wallet_text)
+                            exchange_from_story, merge_offers, trade_key, wallet_text, trade_evidence, settle_offer)
 
 from party_store import PartyConflict, PartyMissing, PartyStore
 from token_usage import TokenUsage, state_turn_id
 
 BASE_DIR = Path(__file__).resolve().parent
-APP_REVISION = "2026-11-27.world-alpha3"
+APP_REVISION = "2026-11-27.world-alpha3.1"
 QWEN_SUMMARY_LIMIT = 480
 QWEN_STATE_LIMIT = 1100
 QWEN_STATE_SETUP_LIMIT = 2200
@@ -77,6 +80,8 @@ def _load_env():
 _ENV_FILE = _load_env()
 
 app = Flask(__name__)
+if hasattr(app,"config"):
+    app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024
 
 LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "300"))
 YANDEX_API_KEY = (os.getenv("YANDEX_API_KEY") or "").strip()
@@ -93,7 +98,7 @@ def _model_id(value):
     return value
 
 
-client_options = {"timeout": LLM_TIMEOUT, "max_retries": 1}
+client_options = {"timeout": LLM_TIMEOUT, "max_retries": 0}
 if USE_YANDEX:
     if not YANDEX_FOLDER_ID:
         raise SystemExit("Для Yandex AI Studio задайте YANDEX_FOLDER_ID в Railway Variables.")
@@ -183,6 +188,21 @@ SAVES_DIR = _saves_dir()
 TOKEN_USAGE = TokenUsage(SAVES_DIR / "token_usage.sqlite3")
 PARTIES = PartyStore(SAVES_DIR / "parties.sqlite3")
 PARTIES.initialize()
+API_BUDGET = ApiBudget(SAVES_DIR / 'api_budget.sqlite3',
+    global_calls=max(1,int(os.getenv('API_DAILY_CALLS','3000'))),
+    owner_calls=max(1,int(os.getenv('API_OWNER_DAILY_CALLS','150'))),
+    global_units=max(1,int(os.getenv('API_DAILY_UNITS','30000000'))))
+ALLOW_LEGACY_LLM = os.getenv('ALLOW_LEGACY_LLM','0') == '1'
+
+def _paid_completion(**options):
+    if os.getenv('API_ENABLED','1') != '1': raise BudgetExceeded('Генерация временно отключена администратором.')
+    try:
+        owner = _owner()
+    except (RuntimeError,AttributeError):
+        owner = ''  # Background memory jobs still use the global ceiling.
+    API_BUDGET.reserve(owner, estimated_units(options))
+    return client.chat.completions.create(**options)
+
 app.add_url_rule("/admin/tokens", view_func=TOKEN_USAGE.dashboard)
 
 # ─── Лимит параллельных обращений к модели ────────────────────────────────
@@ -217,6 +237,7 @@ PENALTY_REJECT = (
 
 def _short_error(exc):
     """Короткий, но конкретный текст ошибки провайдера."""
+    if isinstance(exc,BudgetExceeded): return str(exc)
     text = " ".join(str(exc).split())[:400]
     status = getattr(exc, "status_code", None)
     body = getattr(exc, "body", None)
@@ -225,6 +246,7 @@ def _short_error(exc):
             text += " " + json.dumps(body, ensure_ascii=False)[:300]
         except (TypeError, ValueError):
             pass
+    if API_KEY: text=text.replace(API_KEY,"[redacted]")
     return f"{type(exc).__name__}{' ' + str(status) if status else ''}: {text}"
 
 
@@ -290,7 +312,7 @@ def _create_with_fallback(options, diag=None):
     """Запрос к модели с откатом по параметрам, которые провайдер не принял."""
     while True:
         try:
-            return client.chat.completions.create(**options)
+            return _paid_completion(**options)
         except Exception as exc:
             detail = str(exc).lower()
             status = getattr(exc, "status_code", None)
@@ -329,7 +351,7 @@ def _start_completion(messages, *, max_tokens=None, reasoning_effort=None, diag=
 def _measured_completion(turn_id, stage, **options):
     response = None
     try:
-        response = client.chat.completions.create(**options)
+        response = _paid_completion(**options)
         return response
     finally:
         usage = getattr(response, "usage", None)
@@ -639,7 +661,7 @@ DEFAULT_STATE = {
 # Основные поля листа и краткие условия текущих квестов для мастера.
 STATE_FIELDS = ("name", "race", "class", "background", "level", "xp", "xp_next",
                 "hp", "max_hp", "gold", "silver", "copper", "stats", "conditions", "position",
-                "cover", "weapon_in_hand", "armor_equipped", "restrained")
+                "cover", "weapon_in_hand", "armor_equipped", "restrained", "mana", "max_mana")
 STATE_NOTE = ("[ЛИСТ ПОСЛЕ ПРЕДЫДУЩЕГО ОТВЕТА МАСТЕРА. "
               "Текущий ход игрока ещё не учтён. Используй числа отсюда.]\n")
 
@@ -1289,7 +1311,7 @@ def _engine_command(state, query, check):
         return {**state, "effect_log": []}, f"Кошелёк: {wallet_text(state)}."
     offers = current_offers(state)
     if command == "/shop":
-        prices = [f"• {offer['item']} — {offer['price']} {COINS[offer['currency']][0]}"
+        prices = [f"• {offer['item']} — {offer['price']} {COINS[offer['currency']][0]} · в наличии: {offer.get('stock',1)} · ID: {offer.get('offer_id','—')}"
                   for offer in offers]
         return {**state, "effect_log": []}, ("Цены в этой локации:\n" + "\n".join(prices)
                                              if prices else "Для этой локации пока нет подтверждённых цен. Спросите продавца.")
@@ -1302,7 +1324,6 @@ def _engine_command(state, query, check):
         raise ValueError(restriction)
     if command in {"/attack", "/cast", "/guard", "/retreat"}:
         updated, reply = combat_turn(state, command, argument)
-        updated["effect_log"] = []
         if updated.get("xp") != state.get("xp"):
             level = level_for_xp(updated["xp"])
             old_level = state.get("level", 1)
@@ -1314,21 +1335,24 @@ def _engine_command(state, query, check):
     updated = deepcopy(state)
     updated["effect_log"] = []
     if command == "/equip":
-        item = next((entry for entry in state.get("inventory", []) if _item_name(entry) == _item_name(argument)), None)
+        matches=[entry for entry in state.get('inventory',[]) if _item_name(entry)==_item_name(argument) or isinstance(entry,dict) and entry.get('id')==argument]
+        item=matches[0] if len(matches)==1 else None
         if not item:
             raise ValueError("Укажите точное название предмета из инвентаря.")
         name = item.get("name") if isinstance(item, dict) else item
-        normalized = trade_key(name)
-        if normalized in ARMOR:
+        spec = item_spec(state,item)
+        if spec and spec["slot"] == "armor":
             updated["armor_equipped"] = name
-        elif normalized in WEAPONS:
+            updated["armor_equipped_id"] = item.get("id") if isinstance(item,dict) else None
+        elif spec and spec["slot"] == "weapon":
             updated["weapon_in_hand"] = name
+            updated["weapon_equipped_id"] = item.get("id") if isinstance(item,dict) else None
         else:
             raise ValueError("У предмета пока нет характеристик экипировки.")
-        return updated, f"Экипировано: {name}. КБ героя: {hero_defense(updated)}."
+        return advance_action(updated,6), f"Экипировано: {name}. КБ героя: {hero_defense(updated)}."
     if command == "/buy":
         name, _, quantity_raw = argument.partition("|")
-        matches = [offer for offer in offers if trade_key(offer["item"]) == trade_key(name)]
+        matches = [offer for offer in offers if trade_key(offer["item"]) == trade_key(name) or offer.get("offer_id")==name.strip()]
         if len(matches) != 1:
             raise ValueError("Проверьте доступные товары через /shop и укажите точное название.")
         quantity_raw = quantity_raw.strip()
@@ -1336,14 +1360,16 @@ def _engine_command(state, query, check):
             raise ValueError("Укажите количество от 1 до 99 через |.")
         quantity = int(quantity_raw or "1")
         offer = matches[0]
-        return updated, apply_purchase(updated, {**offer, "quantity": quantity, "price": quantity * offer["price"]})
+        reply = settle_offer(updated,offer,quantity)
+        return advance_action(updated,60), reply
     if not offers:
         raise ValueError("Сначала уточните у торговца цену, чтобы подтвердить торговлю в этой локации.")
     parts = argument.split()
     if len(parts) != 3 or not re.fullmatch(r"[1-9][0-9]{0,5}", parts[1]):
         raise ValueError("Формат: /exchange gold 1 silver.")
     source, amount, target = parts
-    return updated, apply_exchange(updated, {"from": source, "to": target, "amount": int(amount)})
+    reply = apply_exchange(updated, {"from": source, "to": target, "amount": int(amount)})
+    return advance_action(updated,60), reply
 
 
 def _apply_conditional_rewards(merged, current, newly_completed, outcomes, latest):
@@ -1469,7 +1495,7 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
     if isinstance(model_inventory, list):
         # Для дельты достаточно имени и количества: описания предметов не нужны.
         model_state["inventory"] = [
-            {key: item[key] for key in ("id", "name", "quantity") if key in item}
+            {key: item[key] for key in ("id", "name", "quantity", "mechanics", "world_id") if key in item}
             if isinstance(item, dict) else item
             for item in _inventory_with_ids(model_inventory)
         ][:40]
@@ -1509,6 +1535,8 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
                 if attempt == 2:
                     raise StateUnavailable("Мастер ответил, но изменения листа не удалось прочитать. "
                                            "Повторите сохранение.") from exc
+            except BudgetExceeded as exc:
+                raise StateUnavailable(str(exc)) from exc
             except Exception as exc:
                 app.logger.warning("Извлечение состояния: ход=%s причина=%s", turn_id, type(exc).__name__)
                 raise StateUnavailable("Лист не обновился. Можно повторить сохранение этого хода.") from exc
@@ -1537,7 +1565,7 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
     if minute is None:
         minute = (proposed_minute if type(proposed_minute) is int and 0 <= proposed_minute < 1440
                   else campaign_minute({"scene": campaign_scene}))
-        if minute is None and new_character:
+        if minute is None:
             minute = 480
     elif plan:
         minute = plan["until"]
@@ -1556,7 +1584,7 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
     effect_proposals = new_state.pop("effects", None)
     # Never trust direct writes to engine-owned fields, including legacy extraction.
     for protected in ("active_effects", "effect_log", "mana", "max_mana", "hero_form",
-                      "combat", "combat_rounds", "ability_cooldowns", "armor_equipped"):
+                      "combat", "combat_rounds", "ability_cooldowns", "armor_equipped", "world_second", "life_state", "weapon_equipped_id", "armor_equipped_id"):
         new_state.pop(protected, None)
     world_patches = new_state.pop("world_entities", None)
     entities = merge_entities({**current, "scene": campaign_scene}, world_patches, latest)
@@ -1624,7 +1652,7 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
         new_state["abilities"] = normalize_abilities(new_state["abilities"])
         for entry in new_state["abilities"]:
             data = entry.pop("mechanics", None)
-            if isinstance(data, dict) and (mechanics := safe_ability({**data, "name": entry["name"]})):
+            if isinstance(data, dict) and (mechanics := safe_ability({**data, "name": entry["name"]}, power=max(1,min(20,current.get("level",1))))):
                 entry["mechanics"] = mechanics
     if not new_character:
         rest = rest if rest in ("short_rest", "long_rest") else ""
@@ -1662,7 +1690,7 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
                                     and (not isinstance(item, dict) or item.get("id") not in transferred_ids)]
     trade_log = []
     price_proposals = new_state.pop("shop_offers", None)
-    offers_at_scene = {**current, "scene": campaign_scene}
+    offers_at_scene = {**current, "scene": campaign_scene, "world_entities":entities}
     current["shop_offers"] = merge_offers(offers_at_scene, price_proposals, latest)
     purchase = new_state.pop("purchase", None)
     exchange = new_state.pop("exchange", None)
@@ -1682,14 +1710,22 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
             for field in ("inventory", "inventory_remove", *COINS):
                 new_state.pop(field, None)
             try:
-                if not isinstance(purchase, dict) or not _grounded_event(purchase.get("evidence"), latest):
+                if not isinstance(purchase, dict) or not trade_evidence(purchase,latest,quantity=purchase.get("quantity",1) if type(purchase.get("quantity")) is int else 1):
                     raise ValueError("Покупку не удалось подтвердить по этому ходу.")
-                quote = next((offer for offer in current_offers({**current, "scene": campaign_scene})
-                              if trade_key(offer["item"]) == trade_key(purchase.get("item"))), None)
+                candidates = [offer for offer in current_offers({**current, "scene": campaign_scene, "world_entities": entities})
+                              if trade_key(offer["item"]) == trade_key(purchase.get("item"))
+                              and (not purchase.get("seller_id") or offer.get("seller_id")==purchase.get("seller_id"))]
+                if len(candidates)>1: raise ValueError("Уточните продавца.")
+                quote=candidates[0] if candidates else None
+                if purchase.get('seller_id') and not quote: raise ValueError("Нет подтверждённого предложения этого продавца.")
+                if quote and quote.get('seller_id'):
+                    seller=next((e for e in entities if e['id']==quote['seller_id']),None)
+                    if not seller or trade_key(seller['name']) not in trade_key(purchase['evidence']):
+                        raise ValueError("Покупка не привязана к продавцу.")
                 if quote and (type(purchase.get("quantity")) is not int or purchase.get("currency") != quote["currency"]
                               or purchase.get("price") != quote["price"] * purchase["quantity"]):
                     raise ValueError("Цена покупки не совпадает с подтверждённой ценой продавца.")
-                trade_log.append(apply_purchase(current, purchase))
+                trade_log.append(settle_offer(current,quote,purchase["quantity"]) if quote else apply_purchase(current,purchase))
             except ValueError as exc:
                 trade_log.append(f"Отклонено: {exc}")
     resources = new_state.pop("resource_events", {})
@@ -1859,6 +1895,11 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
     for f in ("inventory", "notes", "quests", "conditions", "relationships", "faction_clocks",
               "dc_modifier_reasons", "proficiencies", "skills", "abilities", "level_history", "xp_event_ids"):
         if not isinstance(merged.get(f), list): merged[f] = current.get(f, [])
+    for item in merged.get('inventory',[]):
+        if isinstance(item,dict) and 'mechanics' in item:
+            spec=equipment_spec(item['mechanics'])
+            if spec: item['mechanics']=spec
+            else: item.pop('mechanics',None)
     merged["notes"] = [n for n in (normalize_note(x) for x in merged["notes"]) if n]
     if new_character:
         merged.pop("character_setup_pending", None)
@@ -1871,6 +1912,13 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
             effect_proposals = complete_hero_damage(current, action, latest, effect_proposals)
         merged = resolve_effects(merged, effect_proposals, latest, minute, blocked,
                                  hero_before=(current["hp"], merged["hp"]))
+        if ((minute == previous_minute or previous_minute is None) and not plan
+                and not (resolved_previous and previous_check.get('clock_spent'))):
+            logs=merged.get('effect_log',[])[:]
+            advance_action(merged,6)
+            merged['effect_log']=logs+merged['effect_log']
+        for entity in merged.get('world_entities',[]):
+            if isinstance(entity,dict): sync_life(entity)
         merged["effect_log"].extend(trade_log)
         merged["combat"] = combat_context(merged)
         check = merged.get("pending_check")
@@ -1970,9 +2018,14 @@ def api_health():
     })
 
 
-@app.route("/api/diag")
+@app.route("/api/diag", methods=["GET", "POST"])
 def api_diag():
-    """Диагностика: что настроено и что реально отвечает провайдер."""
+    """Диагностика: только администратор, платный ping по явному POST."""
+    password = os.getenv('TOKEN_ADMIN_PASSWORD','')
+    if not password: return Response('Not found',404)
+    auth=request.authorization
+    if not auth or auth.type!='basic' or auth.username!='admin' or not secrets.compare_digest((auth.password or '').encode(),password.encode()):
+        return Response('Authentication required',401,{'WWW-Authenticate':'Basic realm="Diagnostics"'})
     result = {
         "provider": PROVIDER,
         "model": MODEL,
@@ -1989,6 +2042,7 @@ def api_diag():
         result["hint"] = ("base_url указывает на localhost — Ollama видна только с той же "
                           "машины. На Railway так не работает: нужен облачный провайдер "
                           "(например https://openrouter.ai/api/v1).")
+    if request.method != "POST": return jsonify(result)
     try:
         result["models"] = [m.id for m in client.models.list().data][:60]
         result["model_present"] = MODEL in result["models"]
@@ -1998,7 +2052,7 @@ def api_diag():
         with llm_slot(20) as ok:
             if not ok:
                 raise RuntimeError("нет свободного слота модели")
-            resp = client.chat.completions.create(
+            resp = _paid_completion(
                 model=MODEL, temperature=0, max_tokens=256 if USE_YANDEX else 8,
                 messages=[{"role": "user", "content": "Ответь одним словом: ок"}])
         result["ping"] = (resp.choices[0].message.content or "").strip()
@@ -2127,6 +2181,7 @@ def api_roll():
     data = request.get_json(silent=True) or {}
     try:
         party = None
+        if not isinstance(data,dict): return jsonify({"error":"Ожидается JSON-объект."}),400
         if "party_id" in data:
             party = PARTIES.get(_owner(), _request_id(data["party_id"]))
             if party["revision"] != _revision(data) or party["draft"]:
@@ -2167,6 +2222,7 @@ def api_chat():
     party = None
     request_id = None
     owner = _owner()
+    if not isinstance(data,dict): return jsonify({"error":"Ожидается JSON-объект."}),400
     if "party_id" in data:
         try:
             request_id = _request_id(data.get("request_id"))
@@ -2187,6 +2243,7 @@ def api_chat():
         messages = party["messages"] + [action]
         game_state = party["state"]
     else:
+        if not ALLOW_LEGACY_LLM: return jsonify({"error":"Импортируйте сохранение в приключение перед игрой."}), 403
         messages = data.get("messages") or []
         game_state = data.get("state") or DEFAULT_STATE
     if not isinstance(messages, list) or not messages or any(
@@ -2198,6 +2255,7 @@ def api_chat():
     setup_turn = bool(game_state.get("character_setup_pending")
                       or not (game_state.get("race") and game_state.get("class")))
     action = messages[-1]
+    if len(action.get("content", "")) > 8000: return jsonify({"error":"Действие слишком длинное (макс. 8000 символов)."}),400
     history = messages[:-1]
     if party or messages[0].get("role") != "system":
         prompt = SYSTEM_PROMPT
@@ -2256,7 +2314,7 @@ def api_chat():
         return jsonify({"error": str(exc), "code": "action_invalid"}), 400
     minute = campaign_minute(game_state)
     if minute is not None:
-        state_context["world_clock"] = {"start_minute": minute, "start_label": clock_label(minute)}
+        state_context["world_clock"] = {"start_minute": minute, "start_label": clock_label(minute), "second": game_state.get("world_second",0)}
         if plan:
             state_context["world_clock"].update(end_minute=plan["until"], end_label=plan["label"])
     agenda = [event for event in (game_state.get("agenda") or [])
@@ -2276,14 +2334,22 @@ def api_chat():
     state_context["journal"] = notes_context(game_state.get("notes"), lookup)
     state_context["world_entities"] = world_context(game_state, lookup, player_query=query)
     state_context["active_effects"] = effect_context(game_state)
+    rounds=game_state.get('combat_rounds',0)
+    cooldowns=game_state.get('ability_cooldowns')
+    if type(rounds) is int and isinstance(cooldowns,dict):
+        state_context['ability_cooldowns']={name:max(0,until-rounds-1) for name,until in cooldowns.items() if type(until) is int}
     if battle := combat_context(game_state):
         state_context["combat"] = {field: battle[field] for field in ("target_id", "round", "hero_first") if field in battle}
     if market := current_offers(game_state):
-        state_context["shop_offers"] = [{k: offer[k] for k in ("item", "currency", "price")} for offer in market[:8]]
+        state_context["shop_offers"] = [{k: offer[k] for k in ("item", "currency", "price", "seller_id", "stock", "offer_id") if k in offer} for offer in market[:8]]
     if isinstance(game_state.get("hero_form"), dict):
         state_context["hero_form"] = game_state["hero_form"]
     if type(game_state.get("mana")) is int:
         state_context.update(mana=game_state["mana"], max_mana=game_state.get("max_mana"))
+    elif not setup_turn:
+        from engine.combat import hero_stat
+        capacity=6+max(0,hero_stat(game_state,'int'))*2
+        state_context.update(mana=capacity,max_mana=capacity)
     if result:
         state_context["roll_result"] = result
         state_context["rule_effect"] = rules_result(game_state, result)
@@ -2305,7 +2371,7 @@ def api_chat():
         for ability in abilities:
             if not isinstance(ability, dict) or not isinstance(ability.get("name"), str):
                 continue
-            entry = {key: ability[key] for key in ("name", "uses_left", "uses_max", "recharge") if key in ability}
+            entry = {key: ability[key] for key in ("name", "uses_left", "uses_max", "recharge", "mechanics") if key in ability}
             description = ability.get("description")
             if isinstance(description, str) and description.strip() and descriptions_left:
                 if (ability["name"].casefold() == "второе дыхание"
@@ -2319,7 +2385,7 @@ def api_chat():
     inventory = game_state.get("inventory")
     if isinstance(inventory, list):
         state_context["inventory"] = [
-            {key: item[key] for key in ("id", "name", "quantity") if key in item}
+            {key: item[key] for key in ("id", "name", "quantity", "mechanics", "world_id") if key in item}
             if isinstance(item, dict) else item for item in _inventory_with_ids(inventory)
         ]
     skills = game_state.get("skills")
@@ -2497,7 +2563,7 @@ def api_chat():
                                 reasoning_chars += len(reasoning)
                 except Exception as e:
                     app.logger.exception("Стрим прервался")
-                    if emitted:
+                    if emitted or isinstance(e,BudgetExceeded):
                         hint = _error_hint(e)
                         yield f"\n[Ошибка API: {_short_error(e)}" + (f" {hint}" if hint else "") + "]"
                         return
@@ -2650,6 +2716,7 @@ def _commit_party_turn(data):
 @app.route("/api/state", methods=["POST"])
 def api_state():
     data = request.get_json(silent=True) or {}
+    if not isinstance(data,dict): return jsonify({"error":"Ожидается JSON-объект."}),400
     if "party_id" in data:
         try:
             return _commit_party_turn(data)
@@ -2657,6 +2724,7 @@ def api_state():
             return jsonify({"error": str(exc)}), 503
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 409
+    if not ALLOW_LEGACY_LLM: return jsonify({"error":"Требуется серверное приключение."}), 403
     messages = data.get("messages") or []
     state = data.get("state") or DEFAULT_STATE
     if (not isinstance(state, dict) or not isinstance(messages, list) or not messages
@@ -2696,6 +2764,7 @@ def api_saves_list():
 @app.route("/api/save", methods=["POST"])
 def api_save():
     data = request.get_json(silent=True) or {}
+    if not isinstance(data,dict): return jsonify({"error":"Ожидается JSON-объект."}),400
     name = _safe_name(data.get("name")) or "default"
     party = None
     if "party_id" in data:

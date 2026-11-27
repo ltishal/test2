@@ -5,7 +5,7 @@ Durations use the existing campaign clock, not real time.
 from copy import deepcopy
 import re
 from uuid import uuid4
-from engine.world import records, merge_entities, key, text, KINDS
+from engine.world import records, merge_entities, key, text, KINDS, life_state
 
 STATS = {'str','dex','con','int','wis','cha'}
 CONTROLS = {'sleep','paralysis','hypnosis','fear','restrained','stun','silence','other'}
@@ -67,10 +67,11 @@ def pool(obj, resource):
 
 def change_pool(obj, resource, delta):
     before, maximum=pool(obj,resource)
-    need(not (resource=='hp' and before==0 and delta>0), 'Обычное лечение не воскрешает')
+    need(not (resource=='hp' and (before==0 or life_state(obj)!='alive') and delta>0), 'Обычное лечение не воскрешает')
     after=max(0,min(maximum,before+delta)); obj[resource]=after
     if resource=='hp' and after==0 and obj.get('kind') in ('npc','creature'):
         obj['status']='побеждён (0 HP)'
+        if life_state(obj) not in ('dead','destroyed'): obj['life_state']='defeated'
     return after-before
 
 def active(state):
@@ -82,10 +83,10 @@ def effect_context(state):
     return [{k:e[k] for k in ('id','type','target','name','stat','amount','control','expires','next_tick','interval','remaining','operation') if k in e}
             for e in entries[:MAX_ACTIVE] if not (type(minute) is int and type(e.get('expires')) is int and e['expires']<=minute)]
 
-def check_bonus(state, stat):
+def check_bonus(state, stat, ident="hero"):
     if stat not in STATS: return 0
     # Explicitly classified checks only. Modifier is a bonus to a check, not a base stat rewrite.
-    total=sum(e.get('amount',0) for e in effect_context(state) if e.get('target')=='hero' and e.get('type')=='modifier' and e.get('stat')==stat and type(e.get('amount')) is int)
+    total=sum(e.get('amount',0) for e in effect_context(state) if e.get('target')==ident and e.get('type')=='modifier' and e.get('stat')==stat and type(e.get('amount')) is int)
     return max(-10,min(10,total))
 
 def hero_incapacitated(state):
@@ -166,11 +167,9 @@ def _apply(state, p, minute, evidence, blocked_hp):
         kind=patch.get('kind'); nm=text(patch.get('name'),160)
         need(isinstance(kind,str) and kind in KINDS and nm,'Неизвестный вид или имя объекта')
         need(not patch.get('id'),'Создание не изменяет существующий ID')
-        matches=[e for e in records(state) if e.get('kind')==kind and key(e['name'])==key(nm)]
-        need(len(matches)<=1,'Неоднозначное имя')
-        if not matches:
-            state['world_entities']=merge_entities(state,[{**patch,'evidence':evidence}],evidence)
-            need(any(e.get('kind')==kind and key(e['name'])==key(nm) for e in records(state)),'Объект не создан')
+        previous={e['id'] for e in records(state)}
+        state['world_entities']=merge_entities(state,[{**patch,'evidence':evidence}],evidence)
+        need(any(e['id'] not in previous for e in records(state)) or any(e.get('kind')==kind and key(e['name'])==key(nm) for e in records(state)),'Объект не создан')
         return f'Создано: {nm}'
     if typ=='dispel':
         eid=p.get('effect_id'); old=active(state); found=next((e for e in old if e['id']==eid),None)
@@ -195,6 +194,7 @@ def _apply(state, p, minute, evidence, blocked_hp):
         return f'{label(obj)} → {label(dest)}: {amount} {"HP" if resource=="hp" else "маны"}'
     if typ=='move':
         dest=target(state,p.get('destination')); need(dest.get('kind')=='location','Назначение должно быть локацией')
+        need(dest.get('access') not in ('closed','restricted'),'Доступ к локации закрыт')
         need(obj is state or obj.get('kind') in ('npc','creature','item'),'Объект нельзя переместить')
         if obj is state:
             from campaign import merge_scene, clock_label

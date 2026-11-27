@@ -40,6 +40,30 @@ def trade_key(name):
     return " ".join(name.casefold().replace("ё", "е").split()) if isinstance(name, str) else ""
 
 
+def trade_evidence(proposal, reply, *, quantity=1):
+    if not grounded(proposal, reply): return False
+    evidence=proposal['evidence'].casefold().replace('ё','е')
+    name=trade_key(proposal.get('item'))
+    # Inflection-tolerant stem match for meaningful item words, no unrelated quote.
+    if not name or not all(word[:max(3,len(word)-2)] in evidence for word in re.findall(r'\w+',name) if len(word)>=3): return False
+    if not any(c==proposal.get('currency') and n==proposal.get('price') for c,n in coin_mentions(evidence)): return False
+    if not re.search(r'сто[ия]|цен|прода|куп|отда|покуп|предлага|за\s', evidence): return False
+    if re.search(r'\b(?:не прода|не куп|не отда|отказ|если|может)\w*',evidence): return False
+    if quantity>1 and not re.search(rf'(?<!\d){quantity}(?!\d)\s*(?:шт|ед|порц|предмет)',evidence): return False
+    return True
+
+
+def settle_offer(state, offer, quantity):
+    if not amount(quantity) or quantity>99: raise ValueError('Количество от 1 до 99.')
+    stock=offer.get('stock',1)
+    if type(stock) is int and quantity>stock: raise ValueError('У продавца недостаточно товара.')
+    result=apply_purchase(state,{**offer,'price':offer['price']*quantity,'quantity':quantity})
+    if type(stock) is int:
+        for saved in state.get('shop_offers',[]):
+            if (saved.get('offer_id') and saved.get('offer_id')==offer.get('offer_id')) or (not offer.get('offer_id') and all(saved.get(k)==offer.get(k) for k in ('location','item','seller_id','price','currency'))):
+                saved['stock']=stock-quantity
+    return result
+
 def apply_purchase(state, change):
     currency, price, quantity = (change.get(k) for k in ("currency", "price", "quantity"))
     name = change.get("item")
@@ -113,10 +137,13 @@ def current_offers(state):
     raw = state.get("shop_offers")
     if not location or not isinstance(raw, list):
         return []
+    from engine.world import records, life_state
+    local_sellers={e['id'] for e in records(state) if e.get('kind')=='npc' and life_state(e)=='alive' and trade_key(e.get('location'))==location}
     return [offer for offer in raw if isinstance(offer, dict)
             and trade_key(offer.get("location")) == location and trade_key(offer.get("item"))
             and isinstance(offer.get("currency"), str) and offer["currency"] in COINS
-            and amount(offer.get("price"))][:20]
+            and amount(offer.get("price")) and amount(offer.get("stock",1))
+            and (not offer.get('seller_id') or (isinstance(offer.get('seller_id'),str) and offer['seller_id'] in local_sellers))][:20]
 
 
 def merge_offers(state, proposed, reply):
@@ -126,18 +153,29 @@ def merge_offers(state, proposed, reply):
     if not isinstance(proposed, list) or not trade_key(location):
         return offers
     for quote in proposed[:10]:
-        if not grounded(quote, reply):
+        if not trade_evidence(quote, reply):
             continue
         name, coin, price = (quote.get(k) for k in ("item", "currency", "price"))
         if (not trade_key(name) or len(name) > 160 or not isinstance(coin, str)
                 or coin not in COINS or not amount(price)):
             continue
-        identity = (trade_key(location), trade_key(name))
-        offers = [old for old in offers if (trade_key(old.get("location")), trade_key(old.get("item"))) != identity]
-        offers.append({"location": location, "item": name.strip(), "currency": coin, "price": price})
+        seller_id=quote.get('seller_id')
+        if seller_id is not None and not isinstance(seller_id,str): continue
+        if seller_id:
+            from engine.world import records, life_state
+            seller=next((e for e in records(state) if e['id']==seller_id and e.get('kind')=='npc' and life_state(e)=='alive' and trade_key(e.get('location'))==trade_key(location)),None)
+            if not seller or trade_key(seller['name']) not in trade_key(quote['evidence']): continue
+        stock=quote.get('stock',1)
+        if type(stock) is not int or not 1<=stock<=99: continue
+        if stock>1 and not re.search(rf'(?<!\d){stock}(?!\d)\s*(?:шт|ед|порц|предмет)',quote['evidence'],re.I): continue
+        identity = (trade_key(location), trade_key(name),seller_id)
+        offers = [old for old in offers if (trade_key(old.get("location")), trade_key(old.get("item")),old.get("seller_id")) != identity]
+        from uuid import uuid4
+        offers.append({"location": location, "item": name.strip(), "currency": coin, "price": price,
+                       "seller_id":seller_id,"stock":stock,"offer_id":uuid4().hex})
     return offers[-100:]
 
 
 TRADE_PROMPT = """
-Торговля: подтверждённый размен передай как exchange:{from,to,amount,evidence}, где amount — сколько монет отдал герой, from/to — gold/silver/copper. Курс 1 зм = 10 см = 100 мм, полученную сумму считает сервер. Названную за единицу цену сохрани в shop_offers:[{item,currency,price,evidence}]. При покупке используй сохранённую цену, quantity и кошелёк; не объявляй оплату, если нужного номинала не хватает. Для сверки кошелька используй только лист. Успешную покупку передай через purchase и не дублируй кошелёк или инвентарь.
+Торговля: подтверждённый размен передай как exchange:{from,to,amount,evidence}, где amount — сколько монет отдал герой, from/to — gold/silver/copper. Курс 1 зм = 10 см = 100 мм, полученную сумму считает сервер. Названную за единицу цену сохрани в shop_offers:[{item,currency,price,seller_id,stock,evidence}]. evidence содержит название товара, продавца и цену; stock — доступное количество. При покупке используй сохранённую цену, quantity и кошелёк; не объявляй оплату, если нужного номинала не хватает. Для сверки кошелька используй только лист. Успешную покупку передай через purchase и не дублируй кошелёк или инвентарь.
 """

@@ -278,3 +278,61 @@ class InlineIntegrationTest(unittest.TestCase):
             saved = http.post('/api/state', json=self.data).get_json()
         self.assertIsNone(saved['state']['pending_check'])
         self.assertEqual(saved['state']['hp'], 4)
+
+    def test_alpha31_direct_equipment_clock_and_legacy_inventory(self):
+        state={**self.m.DEFAULT_STATE,'race':'Эльф','class':'Маг','name':'Лис','world_minute':600,'world_second':54,
+               'scene':{'location':'Лес'},'inventory':[{'id':'blade','name':'Ледяная игла','mechanics':{'slot':'weapon','dice':'2d6+1','element':'cold','stat':'dex'}}]}
+        state['active_effects']=[{'id':'p','type':'schedule','target':'hero','name':'Яд','operation':'damage','amount':1,'interval':1,'next_tick':601,'remaining':1}]
+        updated,_=self.m._engine_command(state,'/equip blade',None)
+        self.assertEqual(updated['weapon_in_hand'],'Ледяная игла')
+        self.assertEqual(updated['weapon_equipped_id'],'blade')
+        self.assertEqual((updated['world_minute'],updated['world_second']),(601,0))
+        self.assertEqual(updated['hp'],state['hp']-1)
+        self.assertEqual(updated['active_effects'],[])
+        view,_=self.m._engine_command(updated,'/wallet',None)
+        self.assertEqual(view['world_minute'],601)
+        self.assertEqual(view['world_second'],0)
+
+    def test_alpha31_model_receives_resources_and_cooldown(self):
+        state={**self.m.DEFAULT_STATE,'name':'Лис','race':'Эльф','class':'Маг','mana':4,'max_mana':12,
+               'combat_rounds':8,'ability_cooldowns':{'искры':11},'world_minute':600,'world_second':42}
+        self.party=uuid4().hex; self.data['party_id']=self.party
+        self.m.PARTIES.create(self.owner,self.party,state,[])
+        captured=[]; original=self.m._messages_with_memory
+        def capture(messages,*args,**kwargs):
+            captured.extend(messages)
+            return original(messages,*args,**kwargs)
+        with patch.object(self.m,'_messages_with_memory',side_effect=capture):
+            self.stream('Лес тих.'+START+'{}'+END)
+        joined='\n'.join(m['content'] for m in captured)
+        self.assertIn('"mana": 4',joined)
+        self.assertIn('"max_mana": 12',joined)
+        self.assertIn('"искры": 2',joined)
+        self.assertIn('"second": 42',joined)
+
+    def test_alpha31_diag_is_closed_and_get_never_pings(self):
+        req=types.SimpleNamespace(authorization=None,method='GET')
+        with patch.dict(os.environ,{'TOKEN_ADMIN_PASSWORD':''}),patch.multiple(self.m,request=req,Response=lambda *args:args):
+            self.assertEqual(self.m.api_diag()[1],404)
+        with patch.dict(os.environ,{'TOKEN_ADMIN_PASSWORD':'secret'}),patch.multiple(self.m,request=req,Response=lambda *args:args):
+            self.assertEqual(self.m.api_diag()[1],401)
+        req.authorization=types.SimpleNamespace(type='basic',username='admin',password='secret')
+        with patch.dict(os.environ,{'TOKEN_ADMIN_PASSWORD':'secret'}),patch.multiple(self.m,request=req,jsonify=lambda x:x),patch.object(self.m,'_paid_completion',side_effect=AssertionError('GET must not generate')):
+            self.assertIn('model',self.m.api_diag())
+
+    def test_alpha31_legacy_paid_endpoints_default_denied(self):
+        req=types.SimpleNamespace(get_json=lambda **kw:{'messages':[{'role':'user','content':'test'}]},cookies={},headers={})
+        with patch.multiple(self.m,request=req,jsonify=lambda x:x,ALLOW_LEGACY_LLM=False,_owner=lambda:'owner'):
+            self.assertEqual(self.m.api_chat()[1],403)
+            self.assertEqual(self.m.api_state()[1],403)
+
+    def test_alpha31_budget_precedes_provider_and_kill_switch(self):
+        from engine.api_budget import ApiBudget, BudgetExceeded
+        fake=types.SimpleNamespace(chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=lambda **kw:'ok')))
+        with tempfile.TemporaryDirectory() as path:
+            guard=ApiBudget(Path(path)/'budget.sqlite3',global_calls=1,owner_calls=1,global_units=100)
+            with patch.multiple(self.m,API_BUDGET=guard,client=fake,_owner=lambda:'owner'),patch.dict(os.environ,{'API_ENABLED':'1'}):
+                self.assertEqual(self.m._paid_completion(messages=[{'content':'x'}],max_tokens=10),'ok')
+                with self.assertRaises(BudgetExceeded): self.m._paid_completion(messages=[{'content':'x'}],max_tokens=10)
+            with patch.multiple(self.m,client=fake),patch.dict(os.environ,{'API_ENABLED':'0'}):
+                with self.assertRaisesRegex(BudgetExceeded,'отключена'): self.m._paid_completion(messages=[],max_tokens=1)

@@ -1,5 +1,26 @@
-Alpha 3: Python compileall OK. JavaScript node --check OK.
+Alpha 3.1 — локальная проверка
+Python: Python 3.13.5
+Node: v22.16.0
 
+Python compileall: успешно
+JavaScript node --check: успешно
+Результаты unittest (реальные вызовы API не выполнялись):
+
+test_ability_power_budget (test_alpha31_regression.Alpha31Test.test_ability_power_budget) ... ok
+test_budget_atomic_concurrent_and_unit_cap (test_alpha31_regression.Alpha31Test.test_budget_atomic_concurrent_and_unit_cap) ... ok
+test_budget_persists_and_cookie_rotation_cannot_reset_global (test_alpha31_regression.Alpha31Test.test_budget_persists_and_cookie_rotation_cannot_reset_global) ... ok
+test_closed_location_cannot_be_entered_by_effect (test_alpha31_regression.Alpha31Test.test_closed_location_cannot_be_entered_by_effect) ... ok
+test_custom_equipment_registry_and_combat (test_alpha31_regression.Alpha31Test.test_custom_equipment_registry_and_combat) ... ok
+test_dead_or_remote_seller_unavailable (test_alpha31_regression.Alpha31Test.test_dead_or_remote_seller_unavailable) ... ok
+test_death_synonyms_and_no_resurrection (test_alpha31_regression.Alpha31Test.test_death_synonyms_and_no_resurrection) ... ok
+test_expired_control_and_modifier_on_clock (test_alpha31_regression.Alpha31Test.test_expired_control_and_modifier_on_clock) ... ok
+test_homonyms_new_id_and_move_existing (test_alpha31_regression.Alpha31Test.test_homonyms_new_id_and_move_existing) ... ok
+test_modifier_changes_hero_hit (test_alpha31_regression.Alpha31Test.test_modifier_changes_hero_hit) ... ok
+test_npc_modifier_and_control (test_alpha31_regression.Alpha31Test.test_npc_modifier_and_control) ... ok
+test_partial_seconds_preserved_across_wait_and_round (test_alpha31_regression.Alpha31Test.test_partial_seconds_preserved_across_wait_and_round) ... ok
+test_same_location_explicit_new_entity (test_alpha31_regression.Alpha31Test.test_same_location_explicit_new_entity) ... ok
+test_ten_rounds_advance_minute_and_tick_once (test_alpha31_regression.Alpha31Test.test_ten_rounds_advance_minute_and_tick_once) ... ok
+test_trade_evidence_seller_stock_and_quantity (test_alpha31_regression.Alpha31Test.test_trade_evidence_seller_stock_and_quantity) ... ok
 test_defeat_records_experience_once (test_alpha3_rules.AlphaThreeRulesTest.test_defeat_records_experience_once) ... ok
 test_dispersing_an_effect_already_expired_this_turn_is_idempotent (test_alpha3_rules.AlphaThreeRulesTest.test_dispersing_an_effect_already_expired_this_turn_is_idempotent) ... ok
 test_enemy_known_ability_uses_mana_before_hero_if_initiative_is_higher (test_alpha3_rules.AlphaThreeRulesTest.test_enemy_known_ability_uses_mana_before_hero_if_initiative_is_higher) ... ok
@@ -49,21 +70,36 @@ test_modifier_and_roll (test_effects.EffectsTest.test_modifier_and_roll) ... ok
 test_protocol_effects_and_protected_fields (test_effects.EffectsTest.test_protocol_effects_and_protected_fields) ... ok
 test_schedule_ticks_and_expiration (test_effects.EffectsTest.test_schedule_ticks_and_expiration) ... ok
 test_signed_and_duplicate_hp_blocked (test_effects.EffectsTest.test_signed_and_duplicate_hp_blocked) ... ok
-test_authoritative_http_command_skips_model_and_commits_only_once (test_inline_integration.InlineIntegrationTest.test_authoritative_http_command_skips_model_and_commits_only_once) ... ok
-test_broken_metadata_uses_old_extractor (test_inline_integration.InlineIntegrationTest.test_broken_metadata_uses_old_extractor) ... ok
+[boot] app_revision=2026-11-27.world-alpha3.1 | env=нет (только переменные окружения) | provider=OpenAI-compatible | model=gpt-4o-mini | base_url=http://invalid.invalid | timeout=300s | narration_max_tokens=2300 | narration_setup_tokens=2200
+test_alpha31_budget_precedes_provider_and_kill_switch (test_inline_integration.InlineIntegrationTest.test_alpha31_budget_precedes_provider_and_kill_switch) ... ok
+test_alpha31_diag_is_closed_and_get_never_pings (test_inline_integration.InlineIntegrationTest.test_alpha31_diag_is_closed_and_get_never_pings) ... ok
+test_alpha31_direct_equipment_clock_and_legacy_inventory (test_inline_integration.InlineIntegrationTest.test_alpha31_direct_equipment_clock_and_legacy_inventory) ... ok
+test_alpha31_legacy_paid_endpoints_default_denied (test_inline_integration.InlineIntegrationTest.test_alpha31_legacy_paid_endpoints_default_denied) ... ok
+test_alpha31_model_receives_resources_and_cooldown (test_inline_integration.InlineIntegrationTest.test_alpha31_model_receives_resources_and_cooldown) ... [chat] queue_ms=0 first_text_ms=1 response_ms=8 attempts=1 output_tokens=-
+ok
+test_authoritative_http_command_skips_model_and_commits_only_once (test_inline_integration.InlineIntegrationTest.test_authoritative_http_command_skips_model_and_commits_only_once) ... skipped 'Flask is required to test the HTTP interface'
+test_broken_metadata_uses_old_extractor (test_inline_integration.InlineIntegrationTest.test_broken_metadata_uses_old_extractor) ... [chat] queue_ms=0 first_text_ms=1 response_ms=4 attempts=1 output_tokens=-
+[state] mode=extract turn=be471cd69477461c9f9454fb920f64cb
+ok
 test_effect_fields_not_overwritten_by_fallback (test_inline_integration.InlineIntegrationTest.test_effect_fields_not_overwritten_by_fallback) ... ok
 test_effects_clock_and_signed_damage (test_inline_integration.InlineIntegrationTest.test_effects_clock_and_signed_damage) ... ok
-test_effects_commit_and_retry (test_inline_integration.InlineIntegrationTest.test_effects_commit_and_retry) ... ok
+test_effects_commit_and_retry (test_inline_integration.InlineIntegrationTest.test_effects_commit_and_retry) ... [chat] queue_ms=0 first_text_ms=1 response_ms=4 attempts=1 output_tokens=-
+[state] mode=inline turn=5279ca5eed424298bef79f06a299f70b
+ok
 test_existing_peaceful_npc_is_bound_to_an_announced_roll_without_dc (test_inline_integration.InlineIntegrationTest.test_existing_peaceful_npc_is_bound_to_an_announced_roll_without_dc) ... ok
 test_inline_signed_npc_damage (test_inline_integration.InlineIntegrationTest.test_inline_signed_npc_damage) ... ok
 test_long_narration_preserves_the_player_action_for_the_clock (test_inline_integration.InlineIntegrationTest.test_long_narration_preserves_the_player_action_for_the_clock) ... ok
 test_observed_compound_damage_is_committed_when_inline_mechanics_are_missing (test_inline_integration.InlineIntegrationTest.test_observed_compound_damage_is_committed_when_inline_mechanics_are_missing) ... ok
 test_observed_exchange_and_insufficient_funds_without_poisoned_turn (test_inline_integration.InlineIntegrationTest.test_observed_exchange_and_insufficient_funds_without_poisoned_turn) ... ok
-test_one_call_persists_world_and_retries_do_not_repeat (test_inline_integration.InlineIntegrationTest.test_one_call_persists_world_and_retries_do_not_repeat) ... ok
+test_one_call_persists_world_and_retries_do_not_repeat (test_inline_integration.InlineIntegrationTest.test_one_call_persists_world_and_retries_do_not_repeat) ... [chat] queue_ms=0 first_text_ms=1 response_ms=4 attempts=1 output_tokens=-
+[state] mode=inline turn=fdca4ae5ed7c4214b92c178a3756c105
+ok
 test_paralysis_blocks_attack_and_expires_during_wait (test_inline_integration.InlineIntegrationTest.test_paralysis_blocks_attack_and_expires_during_wait) ... ok
-test_rejected_effect_is_not_in_published_story (test_inline_integration.InlineIntegrationTest.test_rejected_effect_is_not_in_published_story) ... ok
+test_rejected_effect_is_not_in_published_story (test_inline_integration.InlineIntegrationTest.test_rejected_effect_is_not_in_published_story) ... [chat] queue_ms=0 first_text_ms=1 response_ms=4 attempts=1 output_tokens=-
+[state] mode=inline turn=9a90f660250f43739656672d8a869189
+ok
 test_save_name_preserves_cyrillic_and_never_includes_path_separators (test_inline_integration.InlineIntegrationTest.test_save_name_preserves_cyrillic_and_never_includes_path_separators) ... ok
-test_signed_npc_attack_damage_survives_http_roll_and_turn_commit (test_inline_integration.InlineIntegrationTest.test_signed_npc_attack_damage_survives_http_roll_and_turn_commit) ... ok
+test_signed_npc_attack_damage_survives_http_roll_and_turn_commit (test_inline_integration.InlineIntegrationTest.test_signed_npc_attack_damage_survives_http_roll_and_turn_commit) ... skipped 'Flask is required to test the HTTP interface'
 test_cancel_keeps_previous_state_and_durable_summary_never_moves_backwards (test_party_store.PartyStoreTest.test_cancel_keeps_previous_state_and_durable_summary_never_moves_backwards) ... ok
 test_concurrent_retries_only_commit_one_result (test_party_store.PartyStoreTest.test_concurrent_retries_only_commit_one_result) ... ok
 test_notes_update_only_the_current_party (test_party_store.PartyStoreTest.test_notes_update_only_the_current_party) ... ok
@@ -72,6 +108,6 @@ test_owners_and_characters_are_independent (test_party_store.PartyStoreTest.test
 test_restart_restores_draft_and_commit_is_idempotent (test_party_store.PartyStoreTest.test_restart_restores_draft_and_commit_is_idempotent) ... ok
 
 ----------------------------------------------------------------------
-Ran 70 tests in 0.687s
+Ran 90 tests in 0.261s
 
-OK
+OK (skipped=2)

@@ -1561,13 +1561,13 @@ function showWorldCodex() {
   const categories = [['all','Все'],['npc','Персонажи (NPC)'],['creature','Существа'],['item','Предметы'],['location','Локации'],['faction','Фракции'],['ability','Способности'],['other','Прочее']];
   const labels = Object.fromEntries(categories);
   const singular = {npc:'Персонаж',creature:'Существо',item:'Предмет',location:'Локация',faction:'Фракция',ability:'Способность',other:'Объект'};
-  const statuses = {present:'Присутствует',alive:'Жив',dead:'Мёртв',defeated:'Побеждён',unknown:'Неизвестно',missing:'Пропал',absent:'Отсутствует',destroyed:'Уничтожен',active:'Активен',inactive:'Неактивен',discovered:'Обнаружено',available:'Доступно',owned:'Во владении',lost:'Утрачен',open:'Открыто',closed:'Закрыто',restricted:'Доступ ограничен'};
+  const statuses = {present:'Присутствует',alive:'Жив',dead:'Мёртв',defeated:'Побеждён',unconscious:'Без сознания',unknown:'Неизвестно',missing:'Пропал',absent:'Отсутствует',destroyed:'Уничтожен',active:'Активен',inactive:'Неактивен',discovered:'Обнаружено',available:'Доступно',owned:'Во владении',lost:'Утрачен',open:'Открыто',closed:'Закрыто',restricted:'Доступ ограничен'};
   const entities = Array.isArray(state?.world_entities) ? state.world_entities.filter(e=>e && typeof e.name==='string') : [];
   const kind = e => Object.hasOwn(singular,e.kind) ? e.kind : 'other';
   const normalize = v => String(v??'').toLocaleLowerCase('ru').replace(/ё/g,'е');
   const status = e => {
     const access = e.access || (kind(e)==='location' && /(?:проход|вход|въезд)\s+закрыт|перекрыт\w*\s+цепью/iu.test(e.description || '') ? 'closed' : '');
-    const value = access || e.status;
+    const value = access || (e.life_state && e.life_state!=='alive' ? e.life_state : e.status || e.life_state);
     return statuses[normalize(value)] || value || '';
   };
   let selected='all', visible=30;
@@ -1581,6 +1581,7 @@ function showWorldCodex() {
   tabs.innerHTML=categories.map(([id,title])=>'<button type="button" class="btn" data-category="'+id+'" aria-pressed="'+(id==='all')+'">'+esc(title)+'<span class="world-count">'+(id==='all'?entities.length:entities.filter(e=>kind(e)===id).length)+'</span></button>').join('');
   function card(e) {
     return '<article class="world-entry"><strong>'+esc(e.name)+'</strong><span class="world-meta">'+esc(singular[kind(e)])+'</span>'
+      +(entities.some(other=>other!==e&&kind(other)===kind(e)&&normalize(other.name)===normalize(e.name))?'<p class="world-meta">ID: '+esc(e.id||'')+'</p>':'')
       +(e.aliases?.length?'<p>Также известен как: '+esc(e.aliases.join(', '))+'</p>':'')
       +(e.location?'<p>📍 '+esc(e.location)+'</p>':'')+(e.description?'<p>'+esc(e.description)+'</p>':'')
       +(e.traits?'<p>'+esc(e.traits)+'</p>':'')+(e.form?'<p>Форма: '+esc(e.form)+'</p>':'')

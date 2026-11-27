@@ -4,8 +4,10 @@ from random import randint
 import re
 
 from campaign import ability_key, apply_ability_event, formula_key
-from engine.effects import change_pool, effect_context
-from engine.world import combat_ready, entity_names, key, records, text
+from engine.effects import change_pool, effect_context, check_bonus, hero_incapacitated
+from engine.clock import advance_action
+from engine.equipment import equipped, WEAPONS, ARMOR
+from engine.world import combat_ready, entity_names, key, records, text, life_state
 
 ELEMENTS = {"physical", "fire", "cold", "lightning", "poison", "arcane", "radiant", "shadow"}
 STYLE = {"balanced", "aggressive", "defensive", "caster"}
@@ -26,9 +28,6 @@ BUILTIN_ABILITIES = {
     "волшебная стрела": {"dice": "1d4+1", "element": "arcane", "cost": 2,
                          "cooldown": 0, "hits": 3, "automatic": True},
 }
-WEAPONS = {"кинжал": "1d4", "посох": "1d6", "боевой посох": "1d6", "короткий меч": "1d6",
-           "длинный меч": "1d8", "двуручный меч": "2d6", "длинный лук": "1d8"}
-ARMOR = {"кожаная броня": 11, "клепаная кожа": 12, "чешуйчатый доспех": 14, "кольчуга": 16, "латы": 18}
 VICTORY_XP = {"minor": 25, "normal": 50, "dangerous": 100, "elite": 200, "legendary": 400}
 
 
@@ -36,7 +35,7 @@ def bounded_int(value, low, high, default):
     return value if type(value) is int and low <= value <= high else default
 
 
-def safe_ability(data):
+def safe_ability(data, *, power=1):
     if not isinstance(data, dict):
         return None
     name = text(data.get("name"), 100)
@@ -47,11 +46,20 @@ def safe_ability(data):
         return None
     element = data.get("element")
     element = element if isinstance(element, str) and element in ELEMENTS else "physical"
-    return {"name": name, "dice": dice, "element": element,
+    ability = {"name": name, "dice": dice, "element": element,
             "cost": bounded_int(data.get("cost"), 0, 24, 0),
             "cooldown": bounded_int(data.get("cooldown"), 0, 8, 0),
             "hits": bounded_int(data.get("hits"), 1, 4, 1),
             "automatic": data.get("automatic") is True}
+
+    # Cap burst and require resources/cooldown for damage above a tier budget.
+    power = bounded_int(power, 1, 20, 1)
+    burst = max(0, parts[0]*parts[1]+parts[4])*ability['hits']
+    baseline = 10 + power*3
+    if burst > baseline*3 or (burst > baseline and (ability['cost'] < max(1,(burst-baseline+7)//8) or ability['cooldown'] < 1)):
+        return None
+    if ability['automatic'] and burst > baseline and ability['cost'] < 2: return None
+    return ability
 
 
 def profile(entity, proposed=None):
@@ -68,7 +76,7 @@ def profile(entity, proposed=None):
                 resistances[element] = modifier
     abilities = []
     for candidate in raw.get("abilities", [])[:8] if isinstance(raw.get("abilities"), list) else []:
-        if ability := safe_ability(candidate):
+        if ability := safe_ability(candidate, power={"minor":1,"normal":2,"dangerous":5,"elite":9,"legendary":16}.get(threat if isinstance(threat,str) else "",1)):
             if not any(key(entry["name"]) == key(ability["name"]) for entry in abilities):
                 abilities.append(ability)
     style = raw.get("style")
@@ -84,9 +92,9 @@ def hero_stat(state, stat):
 
 
 def hero_defense(state):
-    defense = ARMOR.get(key(state.get("armor_equipped")))
-    modifier = hero_stat(state, "dex")
-    return max(5, (defense or 10) + (modifier if not defense or defense <= 12 else 0))
+    armor = equipped(state, 'armor')
+    modifier = hero_stat(state, 'dex')
+    return max(5, (armor['defense']+(min(modifier,armor['dex_cap']) if armor['dex_cap'] else 0) if armor else 10+modifier))
 
 
 def total(dice, roller):
@@ -111,6 +119,8 @@ def find_combatant(state, ref):
     matches = [entity for entity in records(state) if entity.get("kind") in {"npc", "creature"}
                and (entity["id"] == ref or any(key(name) == key(ref) for name in entity_names(entity)))]
     matches = [entity for entity in matches if local and key(entity.get("location")) == local]
+    exact = [entity for entity in matches if entity["id"] == ref]
+    if exact: matches = exact
     if len(matches) != 1:
         raise ValueError("Укажите точное имя или ID одного персонажа в текущей локации.")
     return matches[0]
@@ -145,7 +155,7 @@ def combat_context(state):
     if not isinstance(combat, dict) or not isinstance(combat.get("target_id"), str):
         return None
     target = next((entity for entity in records(state) if entity["id"] == combat["target_id"]), None)
-    if not target or type(target.get("hp")) is not int or not target["hp"] or not state.get("hp"):
+    if not target or life_state(target)!="alive" or type(target.get("hp")) is not int or not target["hp"] or not state.get("hp"):
         return None
     scene = state.get("scene") or {}
     if not isinstance(scene, dict) or combat.get("location") != scene.get("location"):
@@ -162,7 +172,9 @@ def hero_ability(state, name):
     raw = card.get("mechanics")
     if not isinstance(raw, dict):
         raw = BUILTIN_ABILITIES.get(key(card.get("name")))
-    ability = safe_ability({**raw, "name": card["name"]}) if isinstance(raw, dict) else None
+    ability = safe_ability({**raw, "name": card["name"]}, power=bounded_int(state.get("level"),1,20,1)) if isinstance(raw, dict) else None
+    if not ability and raw is not None and raw is BUILTIN_ABILITIES.get(key(card.get("name"))):
+        ability = {**raw, "name":card["name"]}
     if not ability:
         raise ValueError("У способности нет механики боя. Опишите применение мастеру обычным текстом.")
     if card.get("recharge") == "unlimited" or type(card.get("uses_max")) is int:
@@ -224,6 +236,7 @@ def spend_move(actor, ability, cooldowns, round_number, capacity):
 def combat_turn(original, command, argument, roller=None):
     roller = roller or randint
     state = deepcopy(original)
+    if hero_incapacitated(state): raise ValueError("Герой не может действовать из-за активного эффекта.")
     combat = combat_context(state)
     target_arg = argument
     if command == "/cast":
@@ -236,11 +249,12 @@ def combat_turn(original, command, argument, roller=None):
             raise ValueError("Сейчас нет активного боя.")
         target = find_combatant(state, combat["target_id"])
         die = roller(1, 20)
-        modifier = hero_stat(state, "dex")
+        modifier = hero_stat(state, "dex") + check_bonus(state,"dex")
         difficulty = profile(target)["defense"]
         if die + modifier >= difficulty:
             state["combat"] = None
-            return state, f"Отступление: {die}{modifier:+} против КБ {difficulty}. Герой выходит из боя."
+            state["combat_rounds"] = bounded_int(state.get("combat_rounds"),0,2_000_000_000,0)+1
+            return advance_action(state,6), f"Отступление: {die}{modifier:+} против КБ {difficulty}. Герой выходит из боя."
         command = "/guard"
         retreat = f"Отступление: {die}{modifier:+} против КБ {difficulty}. Противник перекрывает путь."
     else:
@@ -257,7 +271,7 @@ def combat_turn(original, command, argument, roller=None):
     if combat and target["id"] != combat["target_id"]:
         raise ValueError("Сначала завершите текущий бой или попробуйте отступить.")
     combat_ready(target, "normal")
-    if not bounded_int(target.get("hp"), 1, 2_000_000_000, 0):
+    if life_state(target)!="alive" or not bounded_int(target.get("hp"), 1, 2_000_000_000, 0):
         raise ValueError("Этот противник недоступен для боя.")
     if not bounded_int(target.get("max_hp"), target["hp"], 2_000_000_000, 0):
         raise ValueError("У противника повреждена запись здоровья.")
@@ -265,8 +279,8 @@ def combat_turn(original, command, argument, roller=None):
     location = state["scene"]["location"]
     log = [retreat] if retreat else []
     if not combat:
-        hero_init = roller(1, 20) + hero_stat(state, "dex")
-        enemy_init = roller(1, 20) + max(0, enemy["attack"] - 3)
+        hero_init = roller(1, 20) + hero_stat(state, "dex") + check_bonus(state,"dex")
+        enemy_init = roller(1, 20) + max(0, enemy["attack"] - 3) + check_bonus(state,"dex",target["id"])
         combat = {"target_id": target["id"], "location": location, "round": 0,
                   "hero_first": hero_init >= enemy_init, "npc_cooldowns": {}}
         first = (state.get("name") or "Герой") if combat["hero_first"] else target["name"]
@@ -294,6 +308,8 @@ def combat_turn(original, command, argument, roller=None):
         weapon = key(state.get("weapon_in_hand"))
         move = {"name": "Атака" if not weapon else f"Атака: {weapon}",
                 "dice": WEAPONS.get(weapon, "1d4"), "element": "physical"}
+        spec = equipped(state,"weapon")
+        if spec: move.update(dice=spec["dice"],element=spec["element"],stat=spec["stat"])
     log.append(f"Раунд {round_number}.")
     npc_cooldowns = combat.get("npc_cooldowns")
     if not isinstance(npc_cooldowns, dict):
@@ -307,8 +323,8 @@ def combat_turn(original, command, argument, roller=None):
                 if prepared is not None:
                     state.update({field: prepared[field] for field in ("abilities", "mana", "max_mana") if field in prepared})
                     state["ability_cooldowns"] = ready_cooldowns
-                stat = "int" if command == "/cast" else "str"
-                log.append(strike(state, target, move, 2 + hero_stat(state, stat),
+                stat = "int" if command == "/cast" else move.get("stat","str")
+                log.append(strike(state, target, move, 2 + hero_stat(state, stat) + check_bonus(state,stat),
                                   enemy["defense"] + (2 if enemy_guard else 0), enemy["resistances"], roller))
             continue
         if active_control(state, target["id"]) & {"sleep", "paralysis", "stun"}:
@@ -325,8 +341,9 @@ def combat_turn(original, command, argument, roller=None):
             spend_move(target, npc_move, npc_cooldowns, round_number, enemy["mana_pool"])
         else:
             npc_move = {"name": f"Атака: {target['name']}", "dice": enemy["dice"], "element": "physical"}
-        log.append(strike(target, state, npc_move, enemy["attack"],
+        log.append(strike(target, state, npc_move, enemy["attack"] + check_bonus(state,"int" if npc_move["element"] != "physical" else "str",target["id"]),
                           hero_defense(state) + (2 if guarding else 0), {}, roller))
+    advance_action(state,6)
     if state["hp"] <= 0 or target["hp"] <= 0:
         state["combat"] = None
         log.append("Бой завершён.")
@@ -341,5 +358,5 @@ def combat_turn(original, command, argument, roller=None):
 
 
 COMBAT_PROMPT = """
-У существ и NPC при вступлении в бой указывай threat и combat_profile:{style,resistances,abilities}. style: balanced/aggressive/defensive/caster. resistances: ключи physical/fire/cold/lightning/poison/arcane/radiant/shadow со значением resistant/immune/vulnerable. abilities: [{name,dice,element,cost,cooldown,hits,automatic}]. cost в мане, cooldown в раундах. Эти параметры проверяет сервер. Для уже изученной способности героя можно передать такой же объект в abilities[].mechanics. При обычной атаке NPC объявляй имя атакующего и одну формулу, DC атаки по герою определит сервер. Результаты combat и rule_effect считай готовыми фактами.
+У существ и NPC при вступлении в бой указывай threat и combat_profile:{style,resistances,abilities}. style: balanced/aggressive/defensive/caster. resistances: ключи physical/fire/cold/lightning/poison/arcane/radiant/shadow со значением resistant/immune/vulnerable. abilities: [{name,dice,element,cost,cooldown,hits,automatic}]. cost в мане, cooldown в раундах. Эти параметры проверяет сервер: сильный суммарный урон требует затрат маны и перезарядки, учитывается уровень героя или угроза существа. ability_cooldowns — оставшиеся боевые раунды, 0 означает готовность. Не объявляй применение недоступной способности. Для уже изученной способности героя можно передать такой же объект в abilities[].mechanics. При обычной атаке NPC объявляй имя атакующего и одну формулу, DC атаки по герою определит сервер. Результаты combat и rule_effect считай готовыми фактами.
 """
