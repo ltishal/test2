@@ -34,6 +34,13 @@ class Alpha412Test(unittest.TestCase):
         reply = 'Если дорожный паёк стоит 3 серебряных, это могла бы быть хорошая цена.'
         self.assertEqual(merge_offers(state, [], reply, action='Уточняю цену пайка.'), [])
 
+    def test_adjacent_stock_for_a_different_item_does_not_update_quote(self):
+        state = {'scene': {'location': 'Лавка'}}
+        reply = 'Торговец показывает ценник: «Дорожный паёк — 3 серебряных». На прилавке остаются оба зелья.'
+        state['shop_offers'] = merge_offers(state, [], reply)
+        offer, = current_offers(state)
+        self.assertEqual((offer['stock'], offer['price']), (1, 3))
+
     def test_both_narrative_and_saved_escape_status_prevent_attack(self):
         scene = {'location': 'Дорога на Фандалин'}
         enemy = {'id': 'goblin', 'kind': 'creature', 'name': 'Гоблин у леса',

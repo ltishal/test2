@@ -89,22 +89,38 @@ EXPLICIT_QUOTE = re.compile(
 )
 
 
-STOCK_PREFIX = r'(?:в наличии|у него есть|у не[её] есть|остал(?:ся|ось|ись|ась)|есть)'
-DISPLAYED_STOCK = r'(?:выставил[аи]?|выложил[аи]?)\s+на прилавок'
-EXPLICIT_STOCK = re.compile(rf'\b(?:{STOCK_PREFIX}|{DISPLAYED_STOCK})\s+({COUNT})\b', re.I)
+STOCK_PREFIX = (
+    r'(?:в наличии|у него есть|у не[её] есть|есть|'
+    r'остал(?:ся|ось|ись|ась)|оста(?:ётся|ется|ются))'
+)
+DISPLAYED_STOCK = (
+    r'(?:(?:выставил[аи]?|выложил[аи]?)\s+на прилавок|'
+    r'(?:на прилавке|у прилавка(?:\s+(?-i:[А-ЯЁ][а-яё-]+))?)\s+лежат)'
+)
+STOCK_COUNT = rf'(?:{COUNT}|оба|обе)'
+EXPLICIT_STOCK = re.compile(
+    rf'\b(?:{STOCK_PREFIX}|{DISPLAYED_STOCK})\s+({STOCK_COUNT})\b', re.I
+)
 STOCKED_QUOTE = re.compile(
-    rf'\b{STOCK_PREFIX}\s+({COUNT})\s+([а-яё]+(?:\s+[а-яё]+){{0,3}}?)\s+по\s+'
+    rf'\b{STOCK_PREFIX}\s+({STOCK_COUNT})\s+([а-яё]+(?:\s+[а-яё]+){{0,3}}?)\s+по\s+'
     rf'({COUNT})\s+(золот\w*|серебрян\w*|медн\w*|зм|см|мм)\b', re.I
 )
-
-DISPLAYED_PRICE = re.compile(
-    rf'\b{DISPLAYED_STOCK}\s+({COUNT})\s+([а-яё]+(?:\s+[а-яё]+){{0,3}}?)'
-    rf'\s+и называет цену:\s*({COUNT})\s+(золот\w*|серебрян\w*|медн\w*|зм|см|мм)'
-    r'\s+за кажд\w*\b', re.I
+DISPLAYED_ITEM = re.compile(
+    rf'\b{DISPLAYED_STOCK}\s+{STOCK_COUNT}\s+([а-яё]+(?:\s+[а-яё]+){{0,3}}?)'
+    r'(?=\s+и называет цену|[,.;!?])', re.I
 )
+UNIT_PRICE = re.compile(
+    rf'(?:называет цену|цена)\s*[:—–-]\s*{COUNT}\s+'
+    r'(?:золот\w*|серебрян\w*|медн\w*|зм|см|мм)\s+за кажд\w*\b', re.I
+)
+ADJACENT_STOCK = re.compile(
+    r'^[»" ,;]*(?:[.!?]\s*)?(?:(?:торговец|продавец|он|она)\s+подтверждает,?\s+что\s+)?'
+    r'(?:после продажи[^.!?;]{0,42}?\s+)?(?:у него\s+|у не[её]\s+|на прилавке\s+)?'
+    rf'{STOCK_PREFIX}\s+{STOCK_COUNT}\b([^.!?;»"]{{0,45}})', re.I
+)
+
 TRADE_CONTEXT = re.compile(r'торгов|продав|лавк|прилав|таблич|прайс|дощечк\w* с (?:меловой )?надписью', re.I)
 ASK_PRICE = re.compile(r'\b(?:спрашива\w*|уточня\w*|узна\w*|покажи\w*)\b[^.?!]{0,80}\b(?:цен\w*|стоит)\b', re.I)
-
 
 
 def stated_stock(value):
@@ -112,6 +128,8 @@ def stated_stock(value):
     if not match:
         return None
     count = match[1].casefold()
+    if count in ('оба', 'обе'):
+        return 2
     return int(count) if count.isdigit() else WORDS[count]
 
 
@@ -130,24 +148,34 @@ def offers_from_story(reply, action=""):
                 r"переда\w*|плати\w*|покупа\w*|прода\w*|цен[ауые])\b", name, re.I):
             continue
         tail = clean[match.end():match.end()+125]
-        stock_match = re.match(
-            r'^[»" ,;]*(?:[.!?]\s*)?(?:(?:торговец|продавец|он|она)\s+подтверждает,?\s+что\s+)?'
-            r'(?:после продажи[^.!?;]{0,42}?\s+)?(?:у него\s+|у не[её]\s+)?'
-            rf'{STOCK_PREFIX}\s+{COUNT}\b', tail, re.I
-        )
+        stock_match = ADJACENT_STOCK.match(tail)
+        if stock_match and stock_match[1].strip():
+            remainder = stock_match[1].strip()
+            if not (re.match(r'^(?:шт\b|штук\w*|единиц\w*)', remainder, re.I)
+                    or mentions_item(remainder, name)):
+                stock_match = None
         stock = stated_stock(stock_match[0]) if stock_match else None
         evidence = clean[match.start():match.end() + (stock_match.end() if stock_match else 0)].strip(' «»":')
         currency, amount = price[0]
         quotes.append({"item": name, "currency": currency, "price": amount, "stock": stock or 1,
                        "stock_explicit": stock is not None, "evidence": evidence})
-    for pattern in (STOCKED_QUOTE, DISPLAYED_PRICE):
-        for match in pattern.finditer(clean):
-            price = coin_mentions(match[0])
-            if price:
-                currency, amount = price[0]
-                quotes.append({"item": match[2], "currency": currency, "price": amount,
-                               "stock": stated_stock(match[0]), "stock_explicit": True,
-                               "evidence": match[0]})
+    stocked = [(match[2], match[0]) for match in STOCKED_QUOTE.finditer(clean)]
+    for match in DISPLAYED_ITEM.finditer(clean):
+        tail = clean[match.end():match.end()+185]
+        unit_price = UNIT_PRICE.search(tail)
+        if not unit_price:
+            continue
+        between = tail[:unit_price.start()]
+        if len(re.findall(r'[.!?]', between)) > 1 or EXPLICIT_STOCK.search(between):
+            continue
+        stocked.append((match[1], clean[match.start():match.end()+unit_price.end()]))
+    for name, evidence in stocked:
+        price = coin_mentions(evidence)
+        if price:
+            currency, amount = price[-1]
+            quotes.append({"item": name, "currency": currency, "price": amount,
+                           "stock": stated_stock(evidence), "stock_explicit": True,
+                           "evidence": evidence})
     return quotes[:6]
 
 

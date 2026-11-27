@@ -383,6 +383,26 @@ class InlineIntegrationTest(unittest.TestCase):
         self.assertEqual(offer['stock'], 1)
         self.assertEqual(self.m.extract_state(history, updated, inline_delta=delta)['silver'], 7)
 
+    def test_alpha413_counter_stock_and_both_rations_survive_shop_command(self):
+        state = {**self.m.DEFAULT_STATE, 'name': 'Ника', 'race': 'человек', 'class': 'маг',
+                 'silver': 10, 'scene': {'location': 'Двор'}}
+        opening = ('У прилавка Орена лежат два дорожных пайка, каждый обёрнут промасленной тканью; '
+                   'сквозь неё проступают очертания чёрного хлеба и солонины. Осмотр не находит ничего '
+                   'необычного: товар цел, цена — 3 серебряных за каждый. Ника ничего не покупает.')
+        recheck = ('Орен пододвигает к краю прилавка дощечку с выведенной мелом ценой: '
+                   '**дорожный паёк — 3 серебряных**. На прилавке остаются оба пайка. Покупки не было.')
+        for reply in (opening, recheck):
+            with self.subTest(reply=reply):
+                history = [{'role': 'user', 'content': 'Уточняю у Орена цену и остаток. Пока ничего не покупаю.'},
+                           {'role': 'assistant', 'content': reply}]
+                updated = self.m.extract_state(history, state, inline_delta={})
+                _, shop = self.m._engine_command(updated, '/shop', None)
+                self.assertIn('в наличии: 2', shop)
+                bought, _ = self.m._engine_command(updated, '/buy дорожный паёк', None)
+                self.assertEqual(bought['silver'], 7)
+                _, shop = self.m._engine_command(bought, '/shop', None)
+                self.assertIn('в наличии: 1', shop)
+
     def test_save_name_preserves_cyrillic_and_never_includes_path_separators(self):
         self.assertEqual(self.m._safe_name('Тест Alpha 2.1 — Лея'), 'Тест Alpha 2.1 — Лея')
         self.assertEqual(self.m._safe_name('../..'), '')
