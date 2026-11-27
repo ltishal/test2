@@ -47,15 +47,37 @@ def trade_key(name):
     return " ".join(name.casefold().replace("ё", "е").split()) if isinstance(name, str) else ""
 
 
+def item_key(name):
+    return re.sub(rf'^(?:{COUNT})\s+', '', item_words(name))
+
+
+def item_words(value):
+    return re.sub(r'\b(?:паек|пайк(?:а|у|ом|е|и|ов|ам|ами|ах))\b', 'паек', trade_key(value))
+
+
+def same_item(left, right):
+    def forms(value):
+        words = item_key(value).split()
+        return [re.sub(r'(?<=\w{4})(?:ого|ому|ыми|ими|ых|их|ый|ий|ая|ое)$', '', word)
+                for word in words[:-1]] + words[-1:]
+
+    left_words, right_words = forms(left), forms(right)
+    return bool(left_words) and left_words == right_words
+
+
+def mentions_item(name, evidence):
+    words = re.findall(r'\w{3,}', item_key(name))
+    return bool(words) and all(re.search(r'\b' + re.escape(word[:max(3, len(word)-2)]) + r'\w*\b',
+                                         item_words(evidence)) for word in words)
+
+
 def trade_evidence(proposal, reply, *, quantity=1):
     if not grounded(proposal, reply): return False
     evidence=proposal['evidence'].casefold().replace('ё','е')
-    name=trade_key(proposal.get('item'))
-    # Inflection-tolerant stem match for meaningful item words, no unrelated quote.
-    if not name or not all(word[:max(3,len(word)-2)] in evidence for word in re.findall(r'\w+',name) if len(word)>=3): return False
+    if not mentions_item(proposal.get('item'), evidence): return False
     if not any(c==proposal.get('currency') and n==proposal.get('price') for c,n in coin_mentions(evidence)): return False
-    if not re.search(r'сто[ия]|цен|прода|куп|отда|покуп|предлага|за\s|[—–:]', evidence): return False
-    if re.search(r'\b(?:не прода|не куп|не отда|отказ|если|может)\w*',evidence): return False
+    if not re.search(r'сто[ия]|цен|прода|куп|отда|покуп|предлага|(?:за|по)\s|[—–:]', evidence): return False
+    if re.search(r'\b(?:не прода|не куп|не отда|отказ|если|може[тш])\w*',evidence): return False
     if quantity>1 and stated_stock(evidence) != quantity: return False
     return True
 
@@ -67,8 +89,16 @@ EXPLICIT_QUOTE = re.compile(
 )
 
 
+STOCK_PREFIX = r'(?:в наличии|у него есть|у не[её] есть|остал(?:ось|ись|ась)|есть)'
+EXPLICIT_STOCK = re.compile(rf'\b{STOCK_PREFIX}\s+({COUNT})\b', re.I)
+STOCKED_QUOTE = re.compile(
+    rf'\b{STOCK_PREFIX}\s+({COUNT})\s+([а-яё]+(?:\s+[а-яё]+){{0,3}}?)\s+по\s+'
+    rf'({COUNT})\s+(золот\w*|серебрян\w*|медн\w*|зм|см|мм)\b', re.I
+)
+
+
 def stated_stock(value):
-    match = STOCK.search(value)
+    match = EXPLICIT_STOCK.search(value) or STOCK.search(value)
     if not match:
         return None
     count = match[1].casefold()
@@ -82,20 +112,29 @@ def offers_from_story(reply):
     quotes = []
     clean = proof_text(reply)
     for match in EXPLICIT_QUOTE.finditer(clean):
-        name = match[1].strip()
+        name = re.sub(rf'^(?:{COUNT})\s+', '', match[1].strip(), flags=re.I)
         price = coin_mentions(match[0])
-        if not price or len(name.split()) > 6 or re.search(r"\b(?:если|может|не|доступно|нужно)\b", name, re.I):
+        if not price or len(name.split()) > 6 or re.search(
+                r"\b(?:если|может|не|доступно|нужно|называ\w*|подтвержда\w*|говор\w*|"
+                r"переда\w*|плати\w*|покупа\w*|прода\w*|цен[ауые])\b", name, re.I):
             continue
         tail = clean[match.end():match.end()+125]
         stock_match = re.match(
             r'^[»" ,;]*(?:[.!?]\s*)?(?:(?:торговец|продавец|он|она)\s+подтверждает,?\s+что\s+)?'
-            r'(?:в наличии|у него есть|у не[её] есть|осталось)\s+([^.!?;]{1,48})', tail, re.I
+            rf'{STOCK_PREFIX}\s+([^.!?;»"]{{1,48}})', tail, re.I
         )
-        stock = stated_stock(stock_match[1]) if stock_match else None
+        stock = stated_stock(stock_match[0]) if stock_match else None
         evidence = clean[match.start():match.end() + (stock_match.end() if stock_match else 0)].strip(' «»":')
         currency, amount = price[0]
         quotes.append({"item": name, "currency": currency, "price": amount, "stock": stock or 1,
                        "stock_explicit": stock is not None, "evidence": evidence})
+    for match in STOCKED_QUOTE.finditer(clean):
+        price = coin_mentions(match[0])
+        if price:
+            currency, amount = price[0]
+            quotes.append({"item": match[2], "currency": currency, "price": amount,
+                           "stock": stated_stock(match[0]), "stock_explicit": True,
+                           "evidence": match[0]})
     return quotes[:6]
 
 
@@ -106,22 +145,30 @@ PURCHASE_CANCELLED = re.compile(
 )
 PURCHASE_COMPLETE = re.compile(
     r'\b(?:покупк\w* состоял\w*|сделка состоял\w*|покупа(?:ешь|ет|ю)|'
-    r'купил[аи]?|отда[лёт][аи]?|отдал[аи]?|переда(?:л[аи]?|[её]т)|'
-    r'оплатил[аи]?|продал[аи]?|принима\w* монет\w*)\b', re.I
+    r'купил[аи]?|отда(?:л[аи]?|[её]шь|[её]т)|переда(?:л[аи]?|[её]шь|[её]т)|'
+    r'оплатил[аи]?|продал[аи]?|принима\w* монет\w*|платишь|забираешь|получаешь|'
+    r'бер[её]шь|отсчитываешь|вручает|протягивает|переходит к тебе)\b', re.I
 )
 
 
 def confirmed_purchase(proposal, reply):
     if not isinstance(proposal, dict) or PURCHASE_CANCELLED.search(reply):
         return None
-    if not PURCHASE_COMPLETE.search(reply):
-        return None
     quantity = proposal.get('quantity', 1)
     quantity = quantity if type(quantity) is int else 1
-    candidates = [proposal, *({**proposal, 'evidence': sentence}
-                              for sentence in re.split(r'(?<=[.!?])\s+|\n+', reply))]
-    return next((candidate for candidate in candidates
-                 if trade_evidence(candidate, reply, quantity=quantity)), None)
+    chunks = re.split(r'(?<=[.!?])\s+|\n+', reply)
+    windows = [*chunks, *(' '.join(chunks[i:i + 2]) for i in range(len(chunks) - 1))]
+    for evidence in [proposal.get('evidence'), *windows]:
+        if not isinstance(evidence, str) or len(evidence) > 400:
+            continue
+        # A price quote can sit next to an explicit handoff or closing of the
+        # deal. Keep them together, without accepting an unrelated transaction.
+        if not PURCHASE_COMPLETE.search(evidence):
+            continue
+        candidate = {**proposal, 'evidence': evidence}
+        if trade_evidence(candidate, reply, quantity=quantity):
+            return candidate
+    return None
 
 
 def settle_offer(state, offer, quantity):
@@ -241,29 +288,35 @@ def merge_offers(state, proposed, reply):
             from engine.world import records, life_state
             seller=next((e for e in records(state) if e['id']==seller_id and e.get('kind')=='npc' and life_state(e)=='alive' and trade_key(e.get('location'))==trade_key(location)),None)
             if not seller or trade_key(seller['name']) not in trade_key(quote['evidence']): continue
-        stock = quote.get('stock', 1)
-        if not stated_stock(quote['evidence']):
+        explicit = EXPLICIT_STOCK.search(quote['evidence'])
+        stock = stated_stock(quote['evidence']) if explicit else quote.get('stock', 1)
+        if not explicit:
             corroboration = [extra for extra in inferred if extra['stock_explicit']
                              and extra['price'] == price and extra['currency'] == coin
-                             and trade_key(extra['item']) == trade_key(name)
-                             and proof_text(quote['evidence']) in proof_text(extra['evidence'])]
+                             and same_item(extra['item'], name)
+                             and (proof_text(quote['evidence']) in proof_text(extra['evidence'])
+                                  or proof_text(extra['evidence']) in proof_text(quote['evidence']))]
             if len(corroboration) == 1:
                 stock = corroboration[0]['stock']
                 quote = {**quote, 'evidence': corroboration[0]['evidence'], 'stock_explicit': True}
         if type(stock) is not int or not 1<=stock<=99: continue
-        if stock>1 and stated_stock(quote['evidence']) != stock: continue
-        identity = (trade_key(location), trade_key(name),seller_id)
+        if stock > 1 and stated_stock(quote['evidence']) != stock:
+            continue
+        canonical = next((old["item"] for old in offers
+                          if trade_key(old.get("location")) == trade_key(location)
+                          and old.get("seller_id") == seller_id and same_item(old.get("item"), name)), name)
+        identity = (trade_key(location), item_key(canonical), seller_id)
         if not seller_id and (identity[:2] in accepted or any(
-                trade_key(old.get("location")) == identity[0] and trade_key(old.get("item")) == identity[1]
+                trade_key(old.get("location")) == identity[0] and item_key(old.get("item")) == identity[1]
                 and old.get("seller_id") for old in offers)):
             continue
-        previous = next((old for old in offers if (trade_key(old.get("location")), trade_key(old.get("item")),
+        previous = next((old for old in offers if (trade_key(old.get("location")), item_key(old.get("item")),
                                                    old.get("seller_id")) == identity), None)
         if previous and not quote.get('stock_explicit') and not re.search(
                 r"\b(?:в наличии|есть|остал\w*|поступил\w*|запас)\b", quote['evidence'], re.I):
             stock = previous.get('stock', stock)
-        offers = [old for old in offers if (trade_key(old.get("location")), trade_key(old.get("item")),old.get("seller_id")) != identity]
-        offers.append({"location": location, "item": name.strip(), "currency": coin, "price": price,
+        offers = [old for old in offers if (trade_key(old.get("location")), item_key(old.get("item")),old.get("seller_id")) != identity]
+        offers.append({"location": location, "item": (previous or {}).get("item") or name.strip(), "currency": coin, "price": price,
                        "seller_id":seller_id,"stock":stock,"offer_id":(previous or {}).get('offer_id') or uuid4().hex})
         accepted.add(identity[:2])
     return offers[-100:]

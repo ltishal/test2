@@ -1973,6 +1973,8 @@ function abilityUsage(ability) {
   const max = Number(ability.uses_max);
   const left = Number(ability.uses_left ?? max);
   if (ability.recharge === 'passive') return {kind: 'passive'};
+  if (ability.mechanics?.dice && (ability.mechanics.cost > 0 || ability.mechanics.cooldown > 0)
+      && (!Number.isInteger(max) || max <= 0)) return {kind: 'cast'};
   if (['unlimited', 'at_will'].includes(ability.recharge) || max < 0
       || (ability.uses_max == null && left < 0)) return {kind: 'unlimited'};
   if (!Number.isInteger(max) || max <= 0) return {kind: 'passive'};
@@ -2004,6 +2006,10 @@ async function doSkills() {
           'long_rest': 'долгий отдых',
           'day': 'раз в день'
         }[usage.kind === 'limited' ? a.recharge : usage.kind] || '';
+        const casting = usage.kind === 'cast' ? [
+          a.mechanics.cost > 0 ? `Мана: ${a.mechanics.cost}` : '',
+          a.mechanics.cooldown > 0 ? `Перезарядка: ${a.mechanics.cooldown} рд.` : ''
+        ].filter(Boolean).join(' · ') : '';
         return `<div class="ability-card ${isPassive ? 'passive' : ''}">
           <div class="ability-header">
             <span class="ability-name">${esc(name)}</span>
@@ -2014,6 +2020,7 @@ async function doSkills() {
           <div class="ability-desc">${esc(name.toLowerCase() === 'второе дыхание' && /воин/i.test(state.class || '')
             ? 'Восстановить 1d10+' + (state.level || 1) + ' HP.' : a.description || 'Эффект не указан.')}</div>
           ${rechargeLabel ? `<div class="ability-recharge">⟳ ${esc(rechargeLabel)}</div>` : ''}
+          ${casting ? `<div class="ability-recharge">${esc(casting)}</div>` : ''}
         </div>`;
       }).join('') || '<div class="tag empty">нет умений</div>';
   }

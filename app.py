@@ -50,15 +50,15 @@ from engine.world import (WORLD_PROMPT, world_context, merge_entities, npc_damag
 from engine.effects import (EFFECT_PROMPT, PASSIVE_OBSERVATION, resolve_effects, effect_context, check_bonus,
                             complete_hero_damage, control_restriction, hero_incapacitated, STATS, descriptive_damage)
 from engine.combat import (ARMOR, COMBAT_PROMPT, WEAPONS, combat_context, combat_turn, hero_defense, narrated_attacker,
-                           profile, safe_ability, narrated_weapon, narrated_ranged_check, adjust_damage, SHOT_EVENT)
+                           profile, safe_ability, narrated_weapon, narrated_ranged_check, bind_ranged_weapon, adjust_damage, SHOT_EVENT)
 from engine.economy import (TRADE_PROMPT, COINS, apply_exchange, apply_purchase, current_offers,
-                            confirmed_purchase, exchange_from_story, merge_offers, trade_key, wallet_text, settle_offer, PURCHASE_CANCELLED)
+                            confirmed_purchase, exchange_from_story, merge_offers, trade_key, wallet_text, settle_offer, PURCHASE_CANCELLED, item_key, same_item)
 
 from party_store import PartyConflict, PartyMissing, PartyStore
 from token_usage import TokenUsage, state_turn_id
 
 BASE_DIR = Path(__file__).resolve().parent
-APP_REVISION = "2026-11-27.world-alpha4.1"
+APP_REVISION = "2026-11-27.world-alpha4.1.1"
 QWEN_SUMMARY_LIMIT = 480
 QWEN_STATE_LIMIT = 1100
 QWEN_STATE_SETUP_LIMIT = 2200
@@ -632,7 +632,7 @@ STATE_EXTRACT_PROMPT = """
 При покупке верни purchase: {item,quantity,currency,price,evidence}, где item — точное название, quantity — число полученных предметов, currency — gold, silver или copper, price — общая цена, evidence — цитата новой подтверждённой покупки. Для покупки используй только purchase, не возвращай отдельные изменения кошелька или инвентаря.
 
 Обнови лист RPG по последнему ходу. Верни строго JSON только изменённых полей, {} при отсутствии изменений.
-Для выстрела из лука или арбалета объявляй один /roll на попадание и указывай точную цель из сцены. Для этого выстрела сервер фиксирует результат, урон и один боеприпас. Если есть ranged_result, следуй ему и npc_rule_effect. Не объявляй отдельный бросок урона для этого уже разрешённого выстрела и не меняй количество его боеприпасов в дельте.
+Для выстрела из лука или арбалета объявляй один /roll на попадание и указывай точную цель из сцены. Сервер фиксирует результат и расход одного боеприпаса. При наличии world_target_id сервер также вычисляет урон. Если есть ranged_result, следуй ему и npc_rule_effect. Не объявляй бросок урона при промахе или если сервер уже рассчитал урон. Не меняй количество боеприпасов в дельте.
 Меняй состояние только по новому результату в последней реплике мастера. Предыдущие реплики и пересказ старых событий служат контекстом. Лист уже учитывает прошлые удары, лечение, покупки и расходы. Изменяй кошелёк и инвентарь лишь при реальном новом обмене, расходе или находке. Пересказ, проверка числа, предложения и суммы до прошлого обмена ничего не меняют. Для существующего героя верни hp_delta (отрицательный урон или положительное лечение) только за новый результат, и hp_event: короткая дословная фраза из последнего ответа, где этот урон или лечение произошли, а не где обсуждается итоговое здоровье. На запросе броска, сверке или пересказе не возвращай hp_delta. При создании используй hp и max_hp. Для изменений инвентаря или монет у существующего героя верни resource_events: {"inventory":"дословная фраза нового получения, траты или передачи", "wallet":"дословная фраза новой оплаты"}. Укажи только затронутые группы. Цифры в пересказе или сверке не являются событиями. xp, xp_next, level, level_pending, xp_event_ids считает сервер.
 Имя, раса, класс и предыстория меняются только по событию. Поля: name, race, class, background, hp, max_hp, gold, silver, copper, stats {str,dex,con,int,wis,cha}. HP не выше max_hp. Базовые характеристики, владения, навыки и умения назначай при создании, беря их из блока [[ЛИСТ]]: строка «📊» — характеристики, «❤️» — hp, уровень, опыт и кошелёк, «🛡» — владения, «🗣» — языки, «🎯» — навыки с суммарным бонусом, «⚡» — активные умения с uses_max, uses_left и recharge (short_rest, long_rest или day), «🌀» — пассивные и постоянные эффекты с recharge passive и без uses_max, «🎒» — инвентарь. Значки и метки [[ЛИСТ]] в лист не переноси. Название умения бери из блока как есть, включая числовой эффект. Инвентарь, кошелёк и характеристики из блока переноси сразу, в том же ходе. Навык {name,bonus,source}; умение {name,description,uses_max,uses_left,recharge}. Трать применения по событию и восстанавливай по отдыху. Для Дыхания дракона спиши одно применение после разрешения урона, а не пока мастер ждёт бросок. Сохраняй полное описание эффекта при изменении только зарядов. Активное умение «без ограничений» передавай с recharge: "unlimited", без uses_max и uses_left. Пассивный эффект передавай с recharge: "passive". Не используй отрицательные заряды, Markdown и HTML-сущности в названии.
 Для передачи физической вещи из инвентаря персонажа используй item_transfers: [{id,quantity,holder,evidence}]. id — точный ID из инвентаря, holder — имя получателя, evidence — цитата о состоявшейся передаче в этой реплике. Не используй одновременно inventory_remove для той же передачи.
@@ -1382,7 +1382,9 @@ def _engine_command(state, query, check):
         return advance_action(updated,6), f"Экипировано: {name}. КБ героя: {hero_defense(updated)}."
     if command == "/buy":
         name, _, quantity_raw = argument.partition("|")
-        matches = [offer for offer in offers if trade_key(offer["item"]) == trade_key(name) or offer.get("offer_id")==name.strip()]
+        matches = [offer for offer in offers if item_key(offer["item"]) == item_key(name) or offer.get("offer_id")==name.strip()]
+        if not matches:
+            matches = [offer for offer in offers if same_item(offer["item"], name)]
         if len(matches) != 1:
             raise ValueError("Проверьте доступные товары через /shop и укажите точное название.")
         quantity_raw = quantity_raw.strip()
@@ -1665,7 +1667,11 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
                 next_check["practice"] = practice
     else:
         next_check = pending_check(latest, proposed, campaign_scene)
-    if resolved_ammo and next_check and next_check.get("kind") == "damage" and not next_check.get("effect"):
+        if shot_weapon and not attacker:
+            bind_ranged_weapon(current, next_check, shot_weapon)
+    if (resolved_ammo and next_check and next_check.get("kind") == "damage"
+            and not next_check.get("effect")
+            and (resolved_check.get("world_target_id") or result.get("success") is False)):
         next_check = None
     previous_scene = current.get("scene")
     previous_location = previous_scene.get("location") if isinstance(previous_scene, dict) else None
@@ -1774,9 +1780,10 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
                                     and (not isinstance(item, dict) or item.get("id") not in transferred_ids)]
     trade_log = []
     price_proposals = new_state.pop("shop_offers", None)
-    offers_at_scene = {**current, "scene": campaign_scene, "world_entities":entities}
-    current["shop_offers"] = merge_offers(offers_at_scene, price_proposals, latest)
     purchase = new_state.pop("purchase", None)
+    offers_at_scene = {**current, "scene": campaign_scene, "world_entities":entities}
+    stored_offers = current_offers(offers_at_scene, include_sold_out=True)
+    current["shop_offers"] = merge_offers(offers_at_scene, price_proposals, latest)
     exchange = new_state.pop("exchange", None)
     if not new_character:
         structured_exchange = exchange is not None
@@ -1797,8 +1804,12 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
                 purchase = confirmed_purchase(purchase, latest)
                 if not purchase:
                     raise ValueError("Покупку не удалось подтвердить по этому ходу.")
-                candidates = [offer for offer in current_offers({**current, "scene": campaign_scene, "world_entities": entities}, include_sold_out=True)
-                              if trade_key(offer["item"]) == trade_key(purchase.get("item"))
+                # The closing narration may already quote the post-sale balance.
+                # Settle against stock at the beginning of the turn when it exists.
+                refreshed = current_offers({**current, "scene": campaign_scene, "world_entities": entities}, include_sold_out=True)
+                prior_ids = {offer.get("offer_id") for offer in stored_offers if offer.get("offer_id")}
+                candidates = [offer for offer in [*stored_offers, *(offer for offer in refreshed if offer.get("offer_id") not in prior_ids)]
+                              if same_item(offer["item"], purchase.get("item"))
                               and (not purchase.get("seller_id") or offer.get("seller_id")==purchase.get("seller_id"))]
                 if len(candidates)>1: raise ValueError("Уточните продавца.")
                 quote=candidates[0] if candidates else None
@@ -1812,6 +1823,13 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
                     raise ValueError("Цена покупки не совпадает с подтверждённой ценой продавца.")
                 trade_log.append(settle_offer(current,quote,purchase["quantity"]) if quote else apply_purchase(current,purchase))
             except ValueError as exc:
+                # A failed settlement must not replace the matching offer with a
+                # stock figure narrated for a sale that never committed.
+                if isinstance(purchase, dict):
+                    for old in stored_offers:
+                        if same_item(old.get("item"), purchase.get("item")) and old.get("offer_id"):
+                            current["shop_offers"] = [old if offer.get("offer_id") == old["offer_id"] else offer
+                                                      for offer in current["shop_offers"]]
                 trade_log.append(f"Отклонено: {exc}")
     resources = new_state.pop("resource_events", {})
     resources = resources if isinstance(resources, dict) else {}
@@ -2323,7 +2341,7 @@ def api_roll():
                 result = roll_result(check, roll)
         if check and check.get("ammo"):
             require_ammo(state, check["ammo"])
-        if check and check.get("ammo") and result.get("success"):
+        if check and check.get("ammo") and check.get("world_target_id") and result.get("success"):
             target = next((entry for entry in state.get("world_entities", [])
                            if isinstance(entry, dict) and entry.get("id") == check.get("world_target_id")), None)
             if not target:
@@ -2834,7 +2852,7 @@ def _commit_party_turn(data):
         target = roll["check"].get("target", "цель")
         verdict = "попадание" if roll.get("success") else "промах"
         details.append(f"Выстрел по цели «{target}» — {verdict}.")
-        if not next_check:
+        if not next_check and (roll["check"].get("world_target_id") or not roll.get("success")):
             announced = pending_check(reply["content"])
             if announced and announced["kind"] == "damage" and not announced.get("effect"):
                 reply["content"] = check_instructions_in_card(reply["content"], announced)

@@ -322,6 +322,30 @@ class InlineIntegrationTest(unittest.TestCase):
             self.assertIn('промах', fourth['messages'][-1]['resolution'])
             self.assertEqual(http.get('/api/parties/' + pid).json['state'], fourth['state'])
 
+    def test_alpha411_miss_at_unregistered_target_spends_arrow(self):
+        from campaign import roll_result
+        state = {**self.m.DEFAULT_STATE, 'name': 'Кочка', 'race': 'дворф', 'class': 'следопыт',
+                 'stats': {'dex': 16}, 'weapon_in_hand': 'длинный лук',
+                 'inventory': ['длинный лук', {'id': 'arrows', 'name': 'обычные стрелы', 'quantity': 16}]}
+        history = [{'role': 'user', 'content': 'Беру длинный лук и выпускаю одну стрелу в Стального Манекена.'},
+                   {'role': 'assistant', 'content': 'Атака длинным луком по Стальному Манекену: DC 16, /roll 1d20+5.'}]
+        announced = self.m.extract_state(history, state, inline_delta={
+            'pending_check': {'kind': 'attack', 'target': 'Стальной Манекен'}})
+        check = announced['pending_check']
+        self.assertEqual((check['dc'], check['ammo']), (16, 'arrow'))
+        self.assertNotIn('world_target_id', check)
+        self.assertEqual(announced['inventory'][1]['quantity'], 16)
+        for die, expected_check in ((10, None), (15, 'damage')):
+            result = roll_result(check, {'check_id': check['id'], 'expr': '1d20+5', 'rolls': [die]})
+            reply = 'Стрела отскакивает от брони.' if die == 10 else 'Стрела попадает. Урон: /roll 1d8.'
+            resolved = history + [{'role': 'user', 'content': f'[[БРОСОК]] 1d20+5 = {die + 5}.'},
+                                  {'role': 'assistant', 'content': reply}]
+            updated = self.m.extract_state(resolved, announced, result=result, inline_delta={
+                'pending_check': {'kind': 'damage'}, 'inventory_remove': [{'name': 'обычные стрелы', 'quantity': 1}],
+                'resource_events': {'inventory': reply}})
+            self.assertEqual(updated['inventory'][1]['quantity'], 15)
+            self.assertEqual((updated['pending_check'] or {}).get('kind'), expected_check)
+
     def test_alpha41_spell_formula_is_not_a_hit_and_completed_rest_moves_clock(self):
         state = {**self.m.DEFAULT_STATE, 'name': 'Ника', 'race': 'Эльф', 'class': 'Маг',
                  'hp': 4, 'max_hp': 7, 'mana': 1, 'max_mana': 6, 'world_minute': 700}
@@ -340,6 +364,24 @@ class InlineIntegrationTest(unittest.TestCase):
             self.assertEqual((rested['world_minute'], rested['hp'], rested['mana']), (1180, 7, 6))
         downed = self.m.extract_state(history, {**updated, 'hp': 0}, inline_delta={})
         self.assertEqual((downed['world_minute'], downed['hp']), (1180, 0))
+
+    def test_alpha411_narrated_purchase_settles_against_starting_stock(self):
+        from engine.economy import current_offers, merge_offers
+        state = {**self.m.DEFAULT_STATE, 'name': 'Ника', 'race': 'человек', 'class': 'следопыт',
+                 'silver': 10, 'scene': {'location': 'Двор'}}
+        state['shop_offers'] = merge_offers(state, [],
+            'Торговец Орен: «Дорожный паёк — 3 серебряных. Осталось два».')
+        receipt = 'Орен называет цену дорожного пайка — 3 серебряных. Ты платишь и получаешь паёк.'
+        remaining = 'Торговец подтверждает: «Дорожный паёк — 3 серебряных. Осталась одна штука».'
+        history = [{'role': 'user', 'content': 'Покупаю один паёк.'},
+                   {'role': 'assistant', 'content': receipt + ' ' + remaining}]
+        delta = {'purchase': {'item': 'дорожного пайка', 'price': 3, 'currency': 'silver',
+                              'quantity': 1, 'evidence': receipt}}
+        updated = self.m.extract_state(history, state, inline_delta=delta)
+        self.assertEqual((updated['silver'], updated['inventory'][0]['quantity']), (7, 1))
+        offer, = current_offers(updated)
+        self.assertEqual(offer['stock'], 1)
+        self.assertEqual(self.m.extract_state(history, updated, inline_delta=delta)['silver'], 7)
 
     def test_save_name_preserves_cyrillic_and_never_includes_path_separators(self):
         self.assertEqual(self.m._safe_name('Тест Alpha 2.1 — Лея'), 'Тест Alpha 2.1 — Лея')

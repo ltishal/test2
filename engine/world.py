@@ -41,6 +41,12 @@ def life_state(entity):
     if status in DOWN_STATES or entity.get('hp')==0: return 'unconscious' if status in ('unconscious','без сознания') else 'defeated'
     return 'alive'
 
+def is_present(entity):
+    return life_state(entity) == 'alive' and key(entity.get('status')) not in {
+        'сбежал', 'сбежала', 'скрылся', 'скрылась', 'fled',
+    }
+
+
 def sync_life(entity):
     if entity.get('kind') in ('npc','creature'):
         entity['life_state']=life_state(entity)
@@ -267,7 +273,37 @@ def restore_scene_people(entities, scene, reply, previous_scene=None, hero_name=
                              'life_state': 'alive'}
                     combat_ready(entry, 'minor')
                     entities.append(entry)
+    record_goblin_escape(entities, scene, clean)
     return entities
+
+
+GOBLIN_ESCAPE = re.compile(
+    r'\b(?:третий\s+)?гоблин(?:\s+у леса)?\s+'
+    r'(?:уш[её]л|убежал|скрылся|сбежал)\s+(?:в лес|в чащу|между деревьями)\b', re.I
+)
+
+
+def record_goblin_escape(entities, scene, reply):
+    """Persist a confirmed escape when only one local goblin can be identified."""
+    clean = re.sub(r'[*_`]', '', reply)
+    match = GOBLIN_ESCAPE.search(clean)
+    if not match:
+        return
+    prefix = re.split(r'[.!?;:\n—]', clean[:match.start()])[-1]
+    if re.search(r'\b(?:если|возможно|кажется|мог|якобы|не)', prefix, re.I):
+        return
+    location = key(scene.get('location'))
+    local = [entity for entity in entities if entity.get('kind') in ('npc', 'creature')
+             and key(entity.get('location')) == location and life_state(entity) == 'alive'
+             and any(re.search(r'\bгоблин', name, re.I) for name in entity_names(entity))]
+    if len(local) > 1 and re.search(r'третий|у леса', match[0], re.I):
+        local = [entity for entity in local if entity.get('encounter_position') == 'лес'
+                 or encounter_position(entity['name']) == 'лес']
+    if len(local) == 1:
+        local[0]['status'] = 'сбежал'
+        old = text(local[0].get('description'), 540)
+        if not old.endswith('Скрылся в лесу.'):
+            local[0]['description'] = (old + ' Скрылся в лесу.').strip()
 
 
 def world_context(state, query, limit=12, *, player_query=None):

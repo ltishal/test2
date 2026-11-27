@@ -7,7 +7,7 @@ from campaign import ability_key, apply_ability_event, formula_key, pending_chec
 from engine.effects import change_pool, effect_context, check_bonus, hero_incapacitated
 from engine.clock import advance_action
 from engine.equipment import equipped, item_spec, require_ammo, consume_ammo, WEAPONS, ARMOR
-from engine.world import combat_ready, encounter_position, entity_names, key, records, text, life_state
+from engine.world import combat_ready, encounter_position, entity_names, key, records, text, is_present
 
 ELEMENTS = {"physical", "fire", "cold", "lightning", "poison", "arcane", "radiant", "shadow"}
 STYLE = {"balanced", "aggressive", "defensive", "caster"}
@@ -155,7 +155,7 @@ def combat_context(state):
     if not isinstance(combat, dict) or not isinstance(combat.get("target_id"), str):
         return None
     target = next((entity for entity in records(state) if entity["id"] == combat["target_id"]), None)
-    if not target or life_state(target)!="alive" or type(target.get("hp")) is not int or not target["hp"] or not state.get("hp"):
+    if not target or not is_present(target) or type(target.get("hp")) is not int or not target["hp"] or not state.get("hp"):
         return None
     scene = state.get("scene") or {}
     if not isinstance(scene, dict) or combat.get("location") != scene.get("location"):
@@ -260,12 +260,22 @@ def narrated_weapon(state, action):
     return candidates[0] if len(candidates) == 1 else None
 
 
+def bind_ranged_weapon(state, check, weapon):
+    """Use the bow's mechanics even when a target has no world record."""
+    if not check or check.get('kind') != 'attack' or formula_key(check['expr'])[1] != 20:
+        return None
+    stat = weapon['stat']
+    check.update(announced_expr=check['expr'], expr=f'1d20{2 + hero_stat(state, stat):+}',
+                 stat=stat, effect_bonus=check_bonus(state, stat), ammo=weapon['ammo'])
+    return check
+
+
 def narrated_ranged_check(state, weapon, action, reply, proposal):
     if not weapon:
         return None
     scene = state.get('scene') or {}
     local = [entity for entity in records(state) if entity.get('kind') in ('npc', 'creature')
-             and key(entity.get('location')) == key(scene.get('location')) and life_state(entity) == 'alive']
+             and key(entity.get('location')) == key(scene.get('location')) and is_present(entity)]
     proposed = proposal if isinstance(proposal, dict) else {}
     targets = []
     for entity in local:
@@ -298,10 +308,8 @@ def narrated_ranged_check(state, weapon, action, reply, proposal):
     combat_ready(target, 'normal')
     if type(target.get('hp')) is not int:
         return None
-    stat = weapon['stat']
-    check.update(announced_expr=check['expr'], expr=f'1d20{2 + hero_stat(state, stat):+}',
-                 stat=stat, effect_bonus=check_bonus(state, stat), ammo=weapon['ammo'],
-                 world_target_id=target['id'], ranged_dice=weapon['dice'], ranged_element=weapon['element'])
+    bind_ranged_weapon(state, check, weapon)
+    check.update(world_target_id=target['id'], ranged_dice=weapon['dice'], ranged_element=weapon['element'])
     return check
 
 
@@ -343,7 +351,7 @@ def combat_turn(original, command, argument, roller=None):
     if combat and target["id"] != combat["target_id"]:
         raise ValueError("Сначала завершите текущий бой или попробуйте отступить.")
     combat_ready(target, "normal")
-    if life_state(target)!="alive" or not bounded_int(target.get("hp"), 1, 2_000_000_000, 0):
+    if not is_present(target) or not bounded_int(target.get("hp"), 1, 2_000_000_000, 0):
         raise ValueError("Этот противник недоступен для боя.")
     if not bounded_int(target.get("max_hp"), target["hp"], 2_000_000_000, 0):
         raise ValueError("У противника повреждена запись здоровья.")
@@ -425,7 +433,7 @@ def combat_turn(original, command, argument, roller=None):
         state["combat"] = None
         log.append("Раунд завершён." if any(
             entity["id"] != target["id"] and entity.get("kind") == "creature"
-            and key(entity.get("location")) == key(location) and life_state(entity) == "alive"
+            and key(entity.get("location")) == key(location) and is_present(entity)
             and type(entity.get("hp")) is int for entity in records(state)
         ) else "Бой завершён.")
         if target["hp"] == 0 and not target.get("combat_xp_paid"):
