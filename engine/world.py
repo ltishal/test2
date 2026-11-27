@@ -9,6 +9,8 @@ KINDS = {'npc', 'creature', 'item', 'location', 'faction', 'ability', 'other'}
 # Relative power within the world's fiction, not scaled to the player's level.
 THREAT_HP = {'minor': (4,12), 'normal': (13,30), 'dangerous': (31,65), 'elite': (66,130), 'legendary': (131,300)}
 TEXT_FIELDS = {'description': 600, 'location': 180, 'status': 120, 'traits': 400}
+ACCESS_CLOSED = re.compile(r'(?:проход|въезд|вход)\s+закрыт|перекрыт\w*\s+цепью|(?:мост|лавка)\s+закрыт\w*', re.I)
+INTRODUCTION = re.compile(r'(?:—\s*Я\s+|представля(?:ется|ясь)\s*[,:—«„" ]*)([А-ЯЁ][а-яё-]{2,30})(?=[\s.,!?»:—"`]|$)')
 
 
 def text(v, n):
@@ -23,14 +25,60 @@ def records(state):
     value = state.get('world_entities')
     return [e for e in value if isinstance(e,dict) and isinstance(e.get('id'),str) and isinstance(e.get('name'),str)] if isinstance(value,list) else []
 
+def entity_names(entity):
+    aliases = entity.get('aliases')
+    return [entity['name'], *(alias for alias in aliases if isinstance(alias, str))] if isinstance(aliases, list) else [entity['name']]
+
+
+def combat_ready(entity, threat):
+    if (entity.get('kind') not in ('npc', 'creature') or 'hp' in entity or 'max_hp' in entity
+            or not isinstance(threat, str) or threat not in THREAT_HP
+            or key(entity.get('status')) in {'dead', 'defeated', 'мертв', 'погиб', 'погибла', 'побежден'}):
+        return
+    low, high = THREAT_HP[threat]
+    seed = int.from_bytes(sha256(entity['id'].encode()).digest()[:4], 'big')
+    hp = low + seed % (high - low + 1)
+    entity.update(threat=threat, hp=hp, max_hp=hp)
+
+
+def add_known_name(entity, name, entities):
+    if not name or any(key(name) == key(alias) for other in entities for alias in entity_names(other)):
+        return
+    aliases = entity_names(entity)[1:]
+    # For titles used before an introduction, retain the title as a searchable alias.
+    if len(entity['name'].split()) > 1:
+        entity['name'], aliases = name, [entity['name'], *aliases]
+    else:
+        aliases.append(name)
+    entity['aliases'] = aliases[:8]
+
+
+def infer_introduction(entities, reply, scene):
+    intro = INTRODUCTION.search(reply)
+    if not intro or not isinstance(scene, dict):
+        return
+    previous_text = reply[max(0, intro.start() - 170):intro.start()]
+    before = set(re.findall(r'\w+', previous_text.casefold().replace('ё', 'е')))
+    local = key(scene.get('location'))
+    candidates = []
+    for entity in entities:
+        if entity.get('kind') != 'npc' or not local or key(entity.get('location')) != local:
+            continue
+        tokens = set(key(entity['name']).split())
+        score = len((tokens - {'с', 'у', 'на', 'в', 'из'}) & before)
+        if score >= 2:
+            candidates.append((score, entity))
+    candidates.sort(key=lambda value: value[0], reverse=True)
+    if candidates and (len(candidates) == 1 or candidates[0][0] > candidates[1][0]):
+        add_known_name(candidates[0][1], intro[1], entities)
+
 
 def merge_entities(state, proposals, reply):
     """Apply small evidence-grounded patches; identity and combat HP belong to the server."""
     result = deepcopy(records(state))
     by_id = {e['id']: e for e in result}
-    if not isinstance(proposals,list):
-        return result
-    for patch in proposals[:12]:
+    infer_introduction(result, reply, state.get('scene'))
+    for patch in proposals[:12] if isinstance(proposals, list) else []:
         if not isinstance(patch,dict): continue
         evidence = text(patch.get('evidence'),600)
         if len(evidence)<5 or evidence not in reply: continue
@@ -41,29 +89,42 @@ def merge_entities(state, proposals, reply):
             entity = by_id.get(entity_id)
             if entity is None: continue
             # An ID cannot be used to change the identity of another entity.
-            if (name and key(name)!=key(entity['name'])) or (kind and kind!=entity.get('kind')): continue
+            if (name and all(key(name) != key(alias) for alias in entity_names(entity))) or (kind and kind!=entity.get('kind')): continue
         else:
             if not name or not isinstance(kind,str) or kind not in KINDS: continue
-            matches = [e for e in result if e.get('kind')==kind and key(e['name'])==key(name)]
+            matches = [e for e in result if e.get('kind')==kind and any(key(alias) == key(name) for alias in entity_names(e))]
             if len(matches)>1: continue
             entity = matches[0] if matches else None
             if entity is None:
                 entity = {'id':uuid4().hex,'name':name,'kind':kind}
                 result.append(entity)
                 by_id[entity['id']]=entity
-        threat = patch.get('threat')
-        if (entity.get('kind') in {'npc', 'creature'} and 'hp' not in entity
-                and 'max_hp' not in entity and isinstance(threat, str) and threat in THREAT_HP):
-            low, high = THREAT_HP[threat]
-            seed = int.from_bytes(sha256(entity['id'].encode()).digest()[:4], 'big')
-            hp = low + seed % (high - low + 1)
-            entity.update(threat=threat, hp=hp, max_hp=hp)
+        combat_ready(entity, patch.get('threat'))
+        if (isinstance(patch.get('combat_profile'), dict) and type(entity.get('hp')) is int
+                and not isinstance(entity.get('combat_profile'), dict)):
+            from engine.combat import profile
+            entity['combat_profile'] = profile(entity, patch['combat_profile'])
         # Death from the rules engine cannot be silently undone by narration.
         for field, limit in TEXT_FIELDS.items():
             value = text(patch.get(field),limit)
             if value and not (field=='status' and entity.get('hp')==0):
                 entity[field] = value
         entity['evidence']=evidence
+        name_revealed = text(patch.get('known_name'), 100)
+        if entity.get('kind') == 'npc' and name_revealed and name_revealed in evidence:
+            add_known_name(entity, name_revealed, result)
+        access = patch.get('access')
+        if entity.get('kind') == 'location' and access in ('open', 'closed', 'restricted'):
+            entity['access'] = access
+        elif entity.get('kind') == 'location' and ACCESS_CLOSED.search(text(patch.get('description'), 600)):
+            entity['access'] = 'closed'
+    infer_introduction(result, reply, state.get('scene'))
+    for entity in result:
+        if entity.get('kind') == 'location' and not entity.get('access'):
+            if ACCESS_CLOSED.search(text(entity.get('description'), 600)) or key(entity.get('status')) in ('closed', 'закрыт', 'закрыто'):
+                entity['access'] = 'closed'
+            elif key(entity.get('status')) == 'open':
+                entity['access'] = 'open'
     return result
 
 
@@ -110,7 +171,9 @@ def world_context(state, query, limit=12, *, player_query=None):
         name = key(e['name'])
         local = bool(location and (key(e.get('location'))==location or name==location))
         overlap = words & {w[:5] for w in tokens(name + ' ' + text(e.get('description'), 600)) if len(w) >= 3}
-        return (mentions(name, explicit), name in people, any(mentions(name, source) for source in related),
+        names = [key(alias) for alias in entity_names(e)]
+        return (any(mentions(alias, explicit) for alias in names), bool(set(names) & people),
+                any(mentions(alias, source) for alias in names for source in related),
                 e['id'] in affected, local, len(overlap))
     ranked = sorted(reversed(records(state)),key=score,reverse=True)
     budget = 3500
@@ -119,7 +182,9 @@ def world_context(state, query, limit=12, *, player_query=None):
         if len(selected) >= limit:
             break
         entry = {k: text(e.get(k), n) for k,n in {'id':80,'name':160,'kind':30,'description':260,
-                 'location':180,'traits':160,'status':120,'threat':30,'form':120,'environment':160}.items() if isinstance(e.get(k),str)}
+                 'location':180,'traits':160,'status':120,'threat':30,'form':120,'environment':160,'access':24}.items() if isinstance(e.get(k),str)}
+        if isinstance(e.get('aliases'), list):
+            entry['aliases'] = entity_names(e)[1:5]
         entry.update({k:e[k] for k in ('hp','max_hp','mana','max_mana','attitude') if type(e.get(k)) is int})
         size = len(json.dumps(entry,ensure_ascii=False))
         if size <= budget:
@@ -163,5 +228,5 @@ def apply_npc_damage(entities, outcome):
 
 
 WORLD_PROMPT = '''
-ДИНАМИЧЕСКИЙ МИР. Не ограничивай фантазию каталогом. Для новых значимых существ, NPC, предметов, локаций, фракций и способностей верни world_entities: [{kind,name,description,location,traits,status,evidence}]. kind: npc, creature, item, location, faction, ability или other. Для боевого существа можешь при создании или при вступлении ранее мирного NPC в бой указать threat: minor, normal, dangerous, elite, legendary (относительная сила в мире, не подстраивай под героя). HP вычисляет сервер в пределах диапазона силы, не возвращай hp/max_hp. Для двух разных одноимённых существ используй различимые устойчивые имена. Для обновления существующей записи используй точный id из world_entities контекста, не меняй имя и вид. evidence — дословная фраза нового видимого повествования, не фантазия игрока и не пересказ. Не сохраняй неподтверждённые догадки как события. Не воскрешай побеждённых существ без особого сюжетного разрешения. Для новой проверки урона по зарегистрированному существу добавь в pending_check точный world_target_id и target (имя этого существа). Если существо впервые создаётся этим же ходом, вместо ID передай world_target: true и точное имя target. npc_rule_effect — уже вычисленный итог броска по существу, не пересчитывай его. Не объявляй окончательное убийство до разрешения броска. Новые необычные свойства допустимы как сюжетные факты, но не создают автоматическую игровую механику сами по себе.
+ДИНАМИЧЕСКИЙ МИР. Не ограничивай фантазию каталогом. Для новых значимых существ, NPC, предметов, локаций, фракций и способностей верни world_entities: [{kind,name,description,location,traits,status,evidence}]. kind: npc, creature, item, location, faction, ability или other. Для боевого существа можешь при создании или при вступлении ранее мирного NPC в бой указать threat: minor, normal, dangerous, elite, legendary (относительная сила в мире, не подстраивай под героя). HP вычисляет сервер в пределах диапазона силы, не возвращай hp/max_hp. Для двух разных одноимённых существ используй различимые устойчивые имена. Для обновления существующей записи используй точный id из world_entities контекста, не меняй имя и вид напрямую. Если NPC назвал своё имя, обнови прежний id и укажи known_name, подтверждённое фразой evidence; не создавай дубль. Для локации указывай access: open, closed или restricted по фактическому доступу, отдельно от факта обнаружения. evidence — дословная фраза нового видимого повествования, не фантазия игрока и не пересказ. Не сохраняй неподтверждённые догадки как события. Не воскрешай побеждённых существ без особого сюжетного разрешения. Для новой проверки урона по зарегистрированному существу добавь в pending_check точный world_target_id и target (имя этого существа). Если существо впервые создаётся этим же ходом, вместо ID передай world_target: true и точное имя target. npc_rule_effect — уже вычисленный итог броска по существу, не пересчитывай его. Не объявляй окончательное убийство до разрешения броска. Новые необычные свойства допустимы как сюжетные факты, но не создают автоматическую игровую механику сами по себе.
 '''

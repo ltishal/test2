@@ -14,6 +14,9 @@ PASSIVE_OBSERVATION = re.compile(
     r'(?:осматриваюсь|осмотреться|слушаю|прислушиваюсь|наблюдаю|смотрю)[.!?]?'
     r'|я внимательно осматриваюсь вокруг\. что я вижу\?'
 )
+HP_NUMBER = re.compile(r"(?<!\d)([1-9]\d{0,2})\s*(?:HP\s*)?(?:урон\w*|единиц\w*\s+урон\w*)", re.I)
+HIT_VERB = re.compile(r"\b(?:попада\w*|попал\w*|ударя\w*|нанос\w*|нан[её]с\w*|теря\w*|лишил\w*)\b", re.I)
+UNCERTAIN_HIT = re.compile(r"\b(?:если|может|могла?|мог бы|могут|бы|возможн\w*|прошл\w*|тогда|не)\b", re.I)
 MAX_ACTIVE = 40
 MAX_EFFECTS = 12
 MAX_DURATION = 43200  # 30 game days
@@ -101,6 +104,59 @@ def control_restriction(state, action, *, waiting=False):
         return None
     return (f'Герой пока не может действовать ({INCAPACITATED[control]}). '
             'Можно подождать с помощью /wait и дать миру возможность отреагировать.')
+
+
+def damage_from_story(state, action, reply):
+    """Recover clearly stated, realized hero damage from a missing model delta."""
+    if re.search(r'\b(?:напомни\w*|перескаж\w*|сверя\w*|вспомина\w*)\b', action, re.I):
+        return []
+    hero = key(state.get('name'))
+    if len(hero) >= 3 and hero[-1] in 'ая':
+        hero_pattern = re.escape(hero[:-1]) + r'(?:а|я|у|ю|е|и|ы|ой|ей)'
+    else:
+        hero_pattern = re.escape(hero) + r'\w{0,2}' if hero else r'(?!)'
+    named_target = re.compile(r'\b(?:тебя|тебе|твой|геро[йяю]|' + hero_pattern + r')\b', re.I)
+    bound = False
+    recovered = []
+    for raw in re.split(r'(?<=[.!?])\s+|\n+', reply):
+        sentence = raw.strip()
+        clean = re.sub(r'[*_`]', '', sentence)
+        if named_target.search(clean) and (HIT_VERB.search(clean) or re.search(r'попадани\w*', clean, re.I)):
+            bound = not UNCERTAIN_HIT.search(clean)
+        elif not (clean.startswith('-') or clean.startswith('–')):
+            bound = False
+        if not bound or not HIT_VERB.search(clean) or UNCERTAIN_HIT.search(clean):
+            continue
+        amounts = HP_NUMBER.findall(clean)
+        if len(amounts) == 1 and int(amounts[0]) <= 300:
+            recovered.append({'type': 'damage', 'target': 'hero', 'amount': int(amounts[0]), 'evidence': sentence})
+    return recovered[:MAX_EFFECTS]
+
+
+def complete_hero_damage(state, action, reply, proposals):
+    """Fill individually stated hits missing from an otherwise valid turn delta."""
+    damage = [entry for entry in proposals if isinstance(entry, dict)
+              and entry.get("type") == "damage" and entry.get("target") == "hero"]
+    competing = [entry for entry in proposals if isinstance(entry, dict)
+                 and (entry.get("type") == "heal" or entry.get("resource") == "hp")
+                 and (entry.get("target") == "hero" or entry.get("recipient") == "hero")]
+    if competing:
+        return proposals
+    recovered = damage_from_story(state, action, reply)
+    if not recovered or damage and len(recovered) < 2:
+        return proposals
+    matched = set()
+    for entry in damage:
+        evidence = text(entry.get("evidence"), 600)
+        hits = [i for i, effect in enumerate(recovered)
+                if evidence and (evidence in effect["evidence"] or effect["evidence"] in evidence)]
+        if len(hits) != 1 or entry.get("amount") != recovered[hits[0]]["amount"]:
+            return proposals
+        matched.add(hits[0])
+    missing = [effect for i, effect in enumerate(recovered) if i not in matched]
+    if not missing:
+        return proposals
+    return [*proposals, *missing]
 
 def _apply(state, p, minute, evidence, blocked_hp):
     typ=p.get('type'); need(isinstance(typ,str) and typ in LABELS,'Неизвестный тип эффекта')
@@ -213,7 +269,10 @@ def advance_effects(state, minute):
 
 def resolve_effects(state, proposals, reply, minute, blocked_hp=(), hero_before=None):
     """Atomic per proposal, reject without partial writes. Existing clock ticks once per commit."""
-    state=deepcopy(state); reports=advance_effects(state,minute); rejected=[]; blocked=set(blocked_hp)
+    state=deepcopy(state)
+    expiring = {entry['id'] for entry in active(state)
+                if type(minute) is int and type(entry.get('expires')) is int and entry['expires'] <= minute}
+    reports=advance_effects(state,minute); rejected=[]; blocked=set(blocked_hp)
     # Old-style HP delta is a fallback; explicit hero HP effects replace it, not add to it.
     # Preserve independent scheduled ticks when switching to the authoritative base.
     tick_delta=state.get('hp',0)-hero_before[1] if hero_before is not None else 0
@@ -223,6 +282,8 @@ def resolve_effects(state, proposals, reply, minute, blocked_hp=(), hero_before=
         try:
             need(isinstance(p,dict),'Нужен объект эффекта')
             evidence=text(p.get('evidence'),600); need(len(evidence)>=5 and evidence in reply,'Нет подтверждения в повествовании')
+            if p.get('type') == 'dispel' and isinstance(p.get('effect_id'), str) and p['effect_id'] in expiring:
+                continue  # The clock already removed this specific effect in the same turn.
             trial=deepcopy(state)
             hp_targets=set()
             typ=p.get('type')

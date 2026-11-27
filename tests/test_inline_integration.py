@@ -162,3 +162,119 @@ class InlineIntegrationTest(unittest.TestCase):
         history = [{'role': 'user', 'content': '/wait 5'}, {'role': 'assistant', 'content': 'Проходит пять минут.'}]
         updated = self.m.extract_state(history, state, inline_delta={})
         self.assertEqual(updated['active_effects'], [])
+
+    def test_observed_compound_damage_is_committed_when_inline_mechanics_are_missing(self):
+        state = {**self.m.DEFAULT_STATE, 'name': 'Лея', 'race': 'человек', 'class': 'маг',
+                 'hp': 7, 'max_hp': 7}
+        story = ('Тренировка заканчивается двумя отдельными попаданиями по Лее:\n\n'
+                 '- Мягкий дротик попадает на тренировочной отметке: **1 HP урона**.\n'
+                 '- Пружинный маятник срабатывает независимо и наносит ещё **2 HP урона**.')
+        history = [{'role': 'user', 'content': 'Запускаю два тренажёра.'},
+                   {'role': 'assistant', 'content': story}]
+        next_state = self.m.extract_state(history, state, inline_delta={})
+        self.assertEqual(next_state['hp'], 4)
+        self.assertEqual(len(next_state['effect_log']), 2)
+        self.assertEqual(self.m.extract_state(history, next_state, inline_delta={})['hp'], 4)
+        partial = {'effects': [{'type': 'damage', 'target': 'hero', 'amount': 1,
+                               'evidence': 'Мягкий дротик попадает на тренировочной отметке'}]}
+        self.assertEqual(self.m.extract_state(history, state, inline_delta=partial)['hp'], 4)
+        history[0]['content'] = 'Напомни, сколько тренировочного урона я получила.'
+        self.assertEqual(self.m.extract_state(history, state, inline_delta={})['hp'], 7)
+
+    def test_observed_exchange_and_insufficient_funds_without_poisoned_turn(self):
+        state = {**self.m.DEFAULT_STATE, 'name': 'Лея', 'race': 'человек', 'class': 'маг',
+                 'gold': 10}
+        action = 'Соглашаюсь на размен: отдаю ровно одну золотую монету и принимаю ровно десять серебряных.'
+        story = 'Геллен принимает одну золотую монету и отсчитывает десять серебряных. Обмен состоялся.'
+        history = [{'role': 'user', 'content': action}, {'role': 'assistant', 'content': story}]
+        after = self.m.extract_state(history, state, inline_delta={})
+        self.assertEqual((after['gold'], after['silver']), (9, 10))
+        story = 'Геллен отдал тебе дорожный паёк за три серебряных.'
+        history = [{'role': 'user', 'content': 'Покупаю паёк.'}, {'role': 'assistant', 'content': story}]
+        delta = {'purchase': {'item': 'паёк', 'quantity': 1, 'currency': 'silver', 'price': 3, 'evidence': story}}
+        rejected = self.m.extract_state(history, state, inline_delta=delta)
+        self.assertEqual(rejected['inventory'], [])
+        self.assertIn('Покупка не состоялась', rejected['effect_log'][-1])
+        bought = self.m.extract_state(history, after, inline_delta=delta)
+        self.assertEqual((bought['gold'], bought['silver']), (9, 7))
+
+    def test_existing_peaceful_npc_is_bound_to_an_announced_roll_without_dc(self):
+        state = {**self.m.DEFAULT_STATE, 'name': 'Лея', 'race': 'человек', 'class': 'маг',
+                 'hp': 7, 'max_hp': 7, 'scene': {'location': 'Двор'},
+                 'world_entities': [{'id': 'mara', 'name': 'Мара', 'kind': 'npc', 'location': 'Двор'}]}
+        story = 'Мара начинает первой. Бросок за Мару: **/roll 1d20+2**. Пока бросок не разрешён, исход удара открыт.'
+        history = [{'role': 'user', 'content': 'Начинаю учебный спарринг.'},
+                   {'role': 'assistant', 'content': story}]
+        updated = self.m.extract_state(history, state, inline_delta={})
+        npc, = updated['world_entities']
+        self.assertEqual(npc['id'], 'mara')
+        self.assertGreater(npc['hp'], 0)
+        check = updated['pending_check']
+        self.assertEqual((check['actor_id'], check['kind'], check['dc']), ('mara', 'attack', 10))
+        from campaign import roll_result, rules_result
+        roll = roll_result(check, {'expr': '1d20+2', 'rolls': [12], 'check_id': check['id'], 'npc_attack_damage': 4})
+        self.assertTrue(roll['success'])
+        self.assertEqual(rules_result(updated, roll)['hp_after'], 7)
+
+    def test_authoritative_http_command_skips_model_and_commits_only_once(self):
+        if not hasattr(self.m.app, 'test_client'):
+            self.skipTest('Flask is required to test the HTTP interface')
+        self.data['action'] = {'content': '/attack Мара'}
+        state = {**self.m.DEFAULT_STATE, 'name': 'Лея', 'race': 'человек', 'class': 'маг',
+                 'scene': {'location': 'Двор'}, 'world_entities': [
+                     {'id': 'mara', 'name': 'Мара', 'kind': 'npc', 'location': 'Двор', 'hp': 12, 'max_hp': 12}
+                 ]}
+        token = 'A' * 43
+        party_id = uuid4().hex
+        self.m.PARTIES.create(self.m._owner(token), party_id, state, [])
+        self.data['party_id'] = party_id
+        with self.m.app.test_client() as http, patch.multiple(
+            self.m, _check_presence=lambda *args, **kwargs: {'admitted': True},
+            _schedule_summary=lambda *args, **kwargs: None,
+        ), patch.object(self.m, '_start_stream', side_effect=AssertionError('Model should not narrate direct action')), patch.object(
+            self.m, '_measured_completion', side_effect=AssertionError('Model should not resolve direct action')
+        ):
+            http.set_cookie(self.m.OWNER_COOKIE, token)
+            first = http.post('/api/chat', json=self.data)
+            self.assertIn('Инициатива', first.get_data(as_text=True))
+            pending = http.get('/api/parties/' + party_id).get_json()
+            self.assertNotIn('_engine_state', pending['draft']['reply'])
+            committed = http.post('/api/state', json=self.data).get_json()
+            replay = http.post('/api/state', json=self.data).get_json()
+        self.assertEqual(committed['revision'], 1)
+        self.assertEqual(committed, replay)
+        self.assertNotIn('_engine_state', committed['messages'][-1])
+
+    def test_save_name_preserves_cyrillic_and_never_includes_path_separators(self):
+        self.assertEqual(self.m._safe_name('Тест Alpha 2.1 — Лея'), 'Тест Alpha 2.1 — Лея')
+        self.assertEqual(self.m._safe_name('../..'), '')
+        self.assertLessEqual(len(self.m._safe_name('я' * 300).encode()), 128)
+
+    def test_signed_npc_attack_damage_survives_http_roll_and_turn_commit(self):
+        if not hasattr(self.m.app, 'test_client'):
+            self.skipTest('Flask is required to test the HTTP interface')
+        token = 'B' * 43
+        owner = self.m._owner(token)
+        check = {'id': 'bound-attack', 'actor_id': 'wolf', 'kind': 'attack', 'expr': '1d20+3', 'dc': 10}
+        state = {**self.m.DEFAULT_STATE, 'name': 'Лея', 'race': 'человек', 'class': 'маг',
+                 'hp': 7, 'max_hp': 7, 'pending_check': check,
+                 'world_entities': [{'id': 'wolf', 'name': 'Волк', 'kind': 'creature',
+                                     'hp': 10, 'max_hp': 10, 'threat': 'minor'}]}
+        party_id = uuid4().hex
+        self.data['party_id'] = party_id
+        self.m.PARTIES.create(owner, party_id, state, [])
+        with self.m.app.test_client() as http, patch.multiple(
+            self.m, _check_presence=lambda *args, **kwargs: {'admitted': True},
+            _schedule_summary=lambda *args, **kwargs: None,
+        ), patch.object(self.m.random, 'randint', side_effect=[14, 3]):
+            http.set_cookie(self.m.OWNER_COOKIE, token)
+            result = http.post('/api/roll', json={**self.data, 'expr': check['expr']}).get_json()
+            self.assertEqual(result['npc_attack_damage'], 3)
+            action = {'role': 'user', 'content': 'Связанный бросок.', 'roll_receipt': result['receipt']}
+            verified = self.m._signed_roll(action, state, [], party={'id': party_id, 'revision': 0})
+            self.m.PARTIES.stage(owner, party_id, 0, self.turn, {**action, 'roll': verified}, {
+                'role': 'assistant', 'content': 'Волк успевает вцепиться в рукав.', '_state_delta': {},
+            })
+            saved = http.post('/api/state', json=self.data).get_json()
+        self.assertIsNone(saved['state']['pending_check'])
+        self.assertEqual(saved['state']['hp'], 4)

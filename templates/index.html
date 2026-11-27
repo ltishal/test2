@@ -403,7 +403,7 @@
     <span> · Играют с мастером <strong id="presence-playing">{{ presence.playing }}</strong></span>
     <span id="presence-message"></span>
   </div>
-  <button class="icon-btn" id="menu-btn" aria-label="Меню">☰</button>
+  <button class="icon-btn" id="menu-btn" aria-label="Меню" aria-expanded="false" aria-controls="drawer">☰</button>
 </header>
 
 <div id="status"></div>
@@ -414,7 +414,7 @@
   <button class="quick-btn" data-quick="Я прячусь за ближайшим укрытием.">🛡 В укрытие</button>
   <button class="quick-btn" data-quick="Я иду вперёд, готовый к опасности.">🚶 Идти</button>
   <button class="quick-btn" data-quick="Я обращаюсь к ближайшему NPC.">🗣 Говорить</button>
-  <button class="quick-btn" data-quick="Я атакую ближайшего противника!">⚔ Атаковать</button>
+  <button class="quick-btn" id="quick-attack">⚔ Атаковать</button>
   <button class="quick-btn" data-quick="Я устраиваю короткий привал.">🛌 Отдых</button>
   <button class="quick-btn" data-quick="/roll 1d20">🎲 d20</button>
   <button class="quick-btn" id="quick-custom-roll">🎲 Свой</button>
@@ -1067,6 +1067,7 @@ function renderStatus() {
       ${state.hero_form?.form ? '<span class="status-chip">Форма: '+esc(state.hero_form.form)+'</span>' : ''}
       ${Array.isArray(state.active_effects)&&state.active_effects.length ? '<span class="status-chip">✨ Эффекты: '+state.active_effects.length+'</span>' : ''}
       ${Number.isInteger(state.mana)&&Number.isInteger(state.max_mana) ? '<span class="status-chip">Мана: '+state.mana+'/'+state.max_mana+'</span>' : ''}
+      ${state.combat?.round ? '<span class="status-chip">⚔ Раунд '+esc(state.combat.round)+'</span>' : ''}
     </div>
     <div class="status-row"><span style="color:#d45a5a;font-size:11px;width:20px">HP</span>
       <div class="bar-wrap"><div class="bar-fill bar-hp" style="width:${hpPct}%"></div></div>
@@ -1298,8 +1299,21 @@ async function restoreServerParty() {
   setTurnBusy(true);
   try {
     if (partyRef?.revision != null) {
-      const snapshot = await partyRequest('/api/parties/' + partyRef.id);
-      useParty(snapshot, true);
+      try {
+        const snapshot = await partyRequest('/api/parties/' + partyRef.id);
+        useParty(snapshot, true);
+      } catch (error) {
+        if (error.code !== 'party_missing' || !messages.length) throw error;
+        const previous = draftTurn?.action;
+        useParty(await importParty({messages, state, memory: partyMemory}));
+        redrawParty();
+        if (previous?.content && !previous.roll && !previous.roll_receipt) {
+          inputEl.value = previous.content;
+          autosize();
+        }
+        addMsg('system', 'Партия восстановлена на сервере из сохранённой истории этого браузера.');
+        return;
+      }
     } else {
       await ensureParty();
     }
@@ -1505,6 +1519,19 @@ function handleCommand(cmd, arg) {
     case '/wait': return arg ? waitForScene(arg) : showAgenda();
     case '/world': return showWorldCodex();
     case '/effects': return showActiveEffects();
+    case '/attack':
+    case '/cast':
+    case '/guard':
+    case '/retreat':
+    case '/wallet':
+    case '/shop':
+    case '/buy':
+    case '/exchange':
+    case '/equip': {
+      const action = arg ? cmd + ' ' + arg : cmd;
+      addMsg('user', action);
+      return callAI({role: 'user', content: action});
+    }
     case '/sheet': return doSheet();
     case '/skills': return doSkills();
     case '/notes': return doNotes();
@@ -1534,11 +1561,15 @@ function showWorldCodex() {
   const categories = [['all','Все'],['npc','Персонажи (NPC)'],['creature','Существа'],['item','Предметы'],['location','Локации'],['faction','Фракции'],['ability','Способности'],['other','Прочее']];
   const labels = Object.fromEntries(categories);
   const singular = {npc:'Персонаж',creature:'Существо',item:'Предмет',location:'Локация',faction:'Фракция',ability:'Способность',other:'Объект'};
-  const statuses = {present:'Присутствует',alive:'Жив',dead:'Мёртв',defeated:'Побеждён',unknown:'Неизвестно',missing:'Пропал',absent:'Отсутствует',destroyed:'Уничтожен',active:'Активен',inactive:'Неактивен',discovered:'Обнаружено',available:'Доступно',owned:'Во владении',lost:'Утрачен'};
+  const statuses = {present:'Присутствует',alive:'Жив',dead:'Мёртв',defeated:'Побеждён',unknown:'Неизвестно',missing:'Пропал',absent:'Отсутствует',destroyed:'Уничтожен',active:'Активен',inactive:'Неактивен',discovered:'Обнаружено',available:'Доступно',owned:'Во владении',lost:'Утрачен',open:'Открыто',closed:'Закрыто',restricted:'Доступ ограничен'};
   const entities = Array.isArray(state?.world_entities) ? state.world_entities.filter(e=>e && typeof e.name==='string') : [];
   const kind = e => Object.hasOwn(singular,e.kind) ? e.kind : 'other';
   const normalize = v => String(v??'').toLocaleLowerCase('ru').replace(/ё/g,'е');
-  const status = e => statuses[normalize(e.status)] || e.status || '';
+  const status = e => {
+    const access = e.access || (kind(e)==='location' && /(?:проход|вход|въезд)\s+закрыт|перекрыт\w*\s+цепью/iu.test(e.description || '') ? 'closed' : '');
+    const value = access || e.status;
+    return statuses[normalize(value)] || value || '';
+  };
   let selected='all', visible=30;
   modalContent.innerHTML='<h3>🌍 Энциклопедия мира</h3><p class="world-meta">Открытые объекты: '+entities.length+'</p>'
     +'<input type="search" placeholder="Поиск по миру" aria-label="Поиск по миру" id="world-search">'
@@ -1550,6 +1581,7 @@ function showWorldCodex() {
   tabs.innerHTML=categories.map(([id,title])=>'<button type="button" class="btn" data-category="'+id+'" aria-pressed="'+(id==='all')+'">'+esc(title)+'<span class="world-count">'+(id==='all'?entities.length:entities.filter(e=>kind(e)===id).length)+'</span></button>').join('');
   function card(e) {
     return '<article class="world-entry"><strong>'+esc(e.name)+'</strong><span class="world-meta">'+esc(singular[kind(e)])+'</span>'
+      +(e.aliases?.length?'<p>Также известен как: '+esc(e.aliases.join(', '))+'</p>':'')
       +(e.location?'<p>📍 '+esc(e.location)+'</p>':'')+(e.description?'<p>'+esc(e.description)+'</p>':'')
       +(e.traits?'<p>'+esc(e.traits)+'</p>':'')+(e.form?'<p>Форма: '+esc(e.form)+'</p>':'')
       +(e.environment?'<p>Окружение: '+esc(e.environment)+'</p>':'')+(status(e)?'<span class="world-meta">Статус: '+esc(status(e))+'</span>':'')
@@ -1559,7 +1591,7 @@ function showWorldCodex() {
   }
   function render() {
     const q=normalize(field.value.trim());
-    const matches=[...entities].reverse().filter(e=>(selected==='all'||kind(e)===selected)&&normalize([e.name,e.description,e.location,e.traits,e.form,e.environment,status(e),labels[kind(e)]].join(' ')).includes(q));
+    const matches=[...entities].reverse().filter(e=>(selected==='all'||kind(e)===selected)&&normalize([e.name,e.aliases,e.description,e.location,e.traits,e.form,e.environment,status(e),labels[kind(e)]].join(' ')).includes(q));
     const ordered=categories.slice(1).flatMap(([id])=>matches.filter(e=>kind(e)===id));
     const page=ordered.slice(0,visible);
     list.innerHTML=categories.slice(1).map(([id,title])=>{const group=page.filter(e=>kind(e)===id);return group.length?'<section class="world-group"><h4>'+esc(title)+' · '+matches.filter(e=>kind(e)===id).length+'</h4>'+group.map(card).join('')+'</section>':'';}).join('')||'<p class="world-meta">В этой категории пока нет подходящих записей.</p>';
@@ -2031,6 +2063,8 @@ async function doSave(name) {
     name = await promptModal('Название сохранения', 'game-' + Date.now());
     if (!name) return;
   }
+  name = normalizeSaveName(name);
+  if (!name) return addMsg('system', 'Введите имя сохранения буквами или цифрами.');
   // Если имя занято — спросим. Прежняя версия останется в .bak.json
   try {
     const r = await fetch('/api/saves');
@@ -2051,6 +2085,18 @@ async function doSave(name) {
     if (!d.ok) throw new Error(d.error || 'не удалось сохранить');
     addMsg('system', `💾 Сохранено: «${d.name}»`);
   } catch(e) { addMsg('system', 'Ошибка сохранения: ' + e.message); }
+}
+
+function normalizeSaveName(name) {
+  const normalized = name.normalize('NFC').replace(/(?<!\p{Nd})\.|\.(?!\p{Nd})/gu, '')
+    .replace(/[^\p{L}\p{N} _.—–-]/gu, '').replace(/ +/g, ' ').trim();
+  let bytes = 0;
+  const encoder = new TextEncoder();
+  const trimmed = [...normalized].filter(char => {
+    bytes += encoder.encode(char).length;
+    return bytes <= 128;
+  }).join('').trim().replace(/\.+$/, '');
+  return /[\p{L}\p{N}]/u.test(trimmed) ? trimmed : '';
 }
 
 /* Список сохранений: клик по имени — загрузить, ✎ — переименовать, 🗑 — удалить.
@@ -2313,6 +2359,8 @@ function doHelp() {
     '<code>/sheet</code> — полный лист<br><code>/skills</code> — умения и навыки<br>' +
     '<code>/notes</code> — заметки, письма, документы<br>' +
     '<code>/world</code> — энциклопедия открытого мира<br><code>/effects</code> — активные эффекты<br>' +
+    '<code>/attack цель</code> — атака, <code>/cast умение | цель</code> — способность, <code>/guard</code> — защита, <code>/retreat</code> — отступление<br>' +
+    '<code>/equip предмет</code> — экипировать, <code>/wallet</code> — кошелёк, <code>/shop</code> — цены, <code>/buy товар | количество</code> — покупка, <code>/exchange gold 1 silver</code> — размен<br>' +
     '<code>/wait</code> — время и события. <code>/wait next</code> — до ближайшего события<br>' +
     '<code>/save имя</code> — сохранить<br><code>/load имя</code> — загрузить<br>' +
     '<code>/transfer</code> — перенос партии<br><code>/reset</code> — новая игра<br><br>' +
@@ -2451,18 +2499,40 @@ if (quickCustomRoll) {
   };
 }
 
-document.getElementById('menu-btn').onclick = () => {
-  drawerEl.classList.add('open');
-  drawerBg.classList.add('open');
+document.getElementById('quick-attack').onclick = async () => {
+  if (busy || draftTurn) return;
+  if (state?.combat?.target_id) return handleCommand('/attack', '');
+  const local = state?.scene?.location;
+  const targets = (state?.world_entities || []).filter(entity => local && entity.location === local
+    && ['npc', 'creature'].includes(entity.kind) && entity.hp !== 0);
+  if (!targets.length) return sendMessage('Я атакую ближайшего противника!');
+  modalContent.innerHTML = '<h3>Цель атаки</h3>'
+    + targets.map((entity, index) => '<button class="btn" data-target="'+index+'">'+esc(entity.name)+'</button>').join(' ')
+    + '<button class="btn" id="target-cancel">Закрыть</button>';
+  modalEl.classList.add('open');
+  modalContent.querySelectorAll('[data-target]').forEach(button => {
+    button.onclick = () => {
+      modalEl.classList.remove('open');
+      handleCommand('/attack', targets[Number(button.dataset.target)].id);
+    };
+  });
+  modalContent.querySelector('#target-cancel').onclick = () => modalEl.classList.remove('open');
 };
-drawerBg.onclick = () => {
-  drawerEl.classList.remove('open');
-  drawerBg.classList.remove('open');
-};
+
+const menuButton = document.getElementById('menu-btn');
+function setDrawer(open) {
+  drawerEl.classList.toggle('open', open);
+  drawerBg.classList.toggle('open', open);
+  menuButton.setAttribute('aria-expanded', String(open));
+}
+menuButton.onclick = () => setDrawer(!drawerEl.classList.contains('open'));
+drawerBg.onclick = () => setDrawer(false);
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && drawerEl.classList.contains('open')) setDrawer(false);
+});
 document.querySelectorAll('#drawer .btn[data-action]').forEach(btn => {
   btn.onclick = () => {
-    drawerEl.classList.remove('open');
-    drawerBg.classList.remove('open');
+    setDrawer(false);
     const a = btn.dataset.action;
     if (a === 'dice') doRoll();
     else if (a === 'dice-custom') rollModal().then(v => { if (v) doRoll(v); });

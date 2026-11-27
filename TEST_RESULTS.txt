@@ -1,5 +1,13 @@
-Alpha 2.1: Python compileall OK. JavaScript node --check OK.
+Alpha 3: Python compileall OK. JavaScript node --check OK.
 
+test_defeat_records_experience_once (test_alpha3_rules.AlphaThreeRulesTest.test_defeat_records_experience_once) ... ok
+test_dispersing_an_effect_already_expired_this_turn_is_idempotent (test_alpha3_rules.AlphaThreeRulesTest.test_dispersing_an_effect_already_expired_this_turn_is_idempotent) ... ok
+test_enemy_known_ability_uses_mana_before_hero_if_initiative_is_higher (test_alpha3_rules.AlphaThreeRulesTest.test_enemy_known_ability_uses_mana_before_hero_if_initiative_is_higher) ... ok
+test_introduction_preserves_existing_npc_id_and_patches_closed_access (test_alpha3_rules.AlphaThreeRulesTest.test_introduction_preserves_existing_npc_id_and_patches_closed_access) ... ok
+test_prices_are_location_scoped_and_exchange_conserves_value (test_alpha3_rules.AlphaThreeRulesTest.test_prices_are_location_scoped_and_exchange_conserves_value) ... ok
+test_profile_does_not_accept_arbitrary_numbers_or_dice (test_alpha3_rules.AlphaThreeRulesTest.test_profile_does_not_accept_arbitrary_numbers_or_dice) ... ok
+test_remote_target_cannot_be_attacked (test_alpha3_rules.AlphaThreeRulesTest.test_remote_target_cannot_be_attacked) ... ok
+test_server_calculates_hits_resistance_mana_and_cooldown (test_alpha3_rules.AlphaThreeRulesTest.test_server_calculates_hits_resistance_mana_and_cooldown) ... ok
 test_character_identity_keeps_chosen_fields_and_fills_skipped_fields (test_campaign.CampaignTest.test_character_identity_keeps_chosen_fields_and_fills_skipped_fields) ... ok
 test_damage_calculation_and_capped_healing (test_campaign.CampaignTest.test_damage_calculation_and_capped_healing) ... ok
 test_dice_reject_mismatched_check_and_formula (test_campaign.CampaignTest.test_dice_reject_mismatched_check_and_formula) ... ok
@@ -41,15 +49,21 @@ test_modifier_and_roll (test_effects.EffectsTest.test_modifier_and_roll) ... ok
 test_protocol_effects_and_protected_fields (test_effects.EffectsTest.test_protocol_effects_and_protected_fields) ... ok
 test_schedule_ticks_and_expiration (test_effects.EffectsTest.test_schedule_ticks_and_expiration) ... ok
 test_signed_and_duplicate_hp_blocked (test_effects.EffectsTest.test_signed_and_duplicate_hp_blocked) ... ok
+test_authoritative_http_command_skips_model_and_commits_only_once (test_inline_integration.InlineIntegrationTest.test_authoritative_http_command_skips_model_and_commits_only_once) ... ok
 test_broken_metadata_uses_old_extractor (test_inline_integration.InlineIntegrationTest.test_broken_metadata_uses_old_extractor) ... ok
 test_effect_fields_not_overwritten_by_fallback (test_inline_integration.InlineIntegrationTest.test_effect_fields_not_overwritten_by_fallback) ... ok
 test_effects_clock_and_signed_damage (test_inline_integration.InlineIntegrationTest.test_effects_clock_and_signed_damage) ... ok
 test_effects_commit_and_retry (test_inline_integration.InlineIntegrationTest.test_effects_commit_and_retry) ... ok
+test_existing_peaceful_npc_is_bound_to_an_announced_roll_without_dc (test_inline_integration.InlineIntegrationTest.test_existing_peaceful_npc_is_bound_to_an_announced_roll_without_dc) ... ok
 test_inline_signed_npc_damage (test_inline_integration.InlineIntegrationTest.test_inline_signed_npc_damage) ... ok
 test_long_narration_preserves_the_player_action_for_the_clock (test_inline_integration.InlineIntegrationTest.test_long_narration_preserves_the_player_action_for_the_clock) ... ok
+test_observed_compound_damage_is_committed_when_inline_mechanics_are_missing (test_inline_integration.InlineIntegrationTest.test_observed_compound_damage_is_committed_when_inline_mechanics_are_missing) ... ok
+test_observed_exchange_and_insufficient_funds_without_poisoned_turn (test_inline_integration.InlineIntegrationTest.test_observed_exchange_and_insufficient_funds_without_poisoned_turn) ... ok
 test_one_call_persists_world_and_retries_do_not_repeat (test_inline_integration.InlineIntegrationTest.test_one_call_persists_world_and_retries_do_not_repeat) ... ok
 test_paralysis_blocks_attack_and_expires_during_wait (test_inline_integration.InlineIntegrationTest.test_paralysis_blocks_attack_and_expires_during_wait) ... ok
 test_rejected_effect_is_not_in_published_story (test_inline_integration.InlineIntegrationTest.test_rejected_effect_is_not_in_published_story) ... ok
+test_save_name_preserves_cyrillic_and_never_includes_path_separators (test_inline_integration.InlineIntegrationTest.test_save_name_preserves_cyrillic_and_never_includes_path_separators) ... ok
+test_signed_npc_attack_damage_survives_http_roll_and_turn_commit (test_inline_integration.InlineIntegrationTest.test_signed_npc_attack_damage_survives_http_roll_and_turn_commit) ... ok
 test_cancel_keeps_previous_state_and_durable_summary_never_moves_backwards (test_party_store.PartyStoreTest.test_cancel_keeps_previous_state_and_durable_summary_never_moves_backwards) ... ok
 test_concurrent_retries_only_commit_one_result (test_party_store.PartyStoreTest.test_concurrent_retries_only_commit_one_result) ... ok
 test_notes_update_only_the_current_party (test_party_store.PartyStoreTest.test_notes_update_only_the_current_party) ... ok
@@ -58,6 +72,6 @@ test_owners_and_characters_are_independent (test_party_store.PartyStoreTest.test
 test_restart_restores_draft_and_commit_is_idempotent (test_party_store.PartyStoreTest.test_restart_restores_draft_and_commit_is_idempotent) ... ok
 
 ----------------------------------------------------------------------
-Ran 56 tests in 0.540s
+Ran 70 tests in 0.687s
 
 OK

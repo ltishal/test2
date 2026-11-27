@@ -5,8 +5,8 @@ import math
 START = '[[STATE_DELTA]]'
 END = '[[/STATE_DELTA]]'
 MAX_DELTA_CHARS = 24000
-OBJECTS = set('scene elapsed clock_end pending_check cancel_check rest_event ability_event purchase resource_events stats level_upgrade'.split())
-ARRAYS = set('schedule resolve_events reward_outcomes facts npc_actions inventory inventory_remove item_transfers notes quests conditions relationships faction_clocks dc_modifier_reasons proficiencies skills abilities languages world_entities effects'.split())
+OBJECTS = set('scene elapsed clock_end pending_check cancel_check rest_event ability_event purchase exchange resource_events stats level_upgrade'.split())
+ARRAYS = set('schedule resolve_events reward_outcomes facts npc_actions inventory inventory_remove item_transfers notes quests conditions relationships faction_clocks dc_modifier_reasons proficiencies skills abilities languages world_entities effects shop_offers'.split())
 STRINGS = set('name race class background position cover weapon_in_hand hp_event'.split())
 INTS = set('world_minute hp max_hp hp_delta gold silver copper dc_modifier'.split())
 IGNORED = set('xp xp_next level level_pending xp_event_ids quest_xp_awards quest_xp_paid_ids level_history last_state_event_id'.split())

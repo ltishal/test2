@@ -85,7 +85,7 @@ def formula_key(expr):
     return count, sides, (keep or "").lower(), keep_count, int(bonus or 0)
 
 
-def pending_check(reply, proposed=None, scene=None):
+def pending_check(reply, proposed=None, scene=None, *, defense_dc=None):
     """A check must be announced in the actual reply. Older replies can be inferred."""
     if not isinstance(reply, str):
         return None
@@ -110,7 +110,7 @@ def pending_check(reply, proposed=None, scene=None):
         return None
     nearby = reply[max(0, command.start() - 470):command.start()].replace("*", "")
     targets = list(DIFFICULTY.finditer(nearby))
-    dc = next(iter(difficulties), None)
+    dc = defense_dc if defense_dc is not None else next(iter(difficulties), None)
     suggested = proposed if isinstance(proposed, dict) else {}
     title = _text(suggested.get("title"))
     kind = suggested.get("kind")
@@ -221,6 +221,12 @@ def roll_result(check, roll):
         dc = check.get("dc")
         if type(dc) is int:
             result["success"] = result["total"] >= dc
+        damage = roll.get("npc_attack_damage")
+        if check.get("kind") == "attack" and check.get("actor_id") and isinstance(result.get("success"), bool):
+            if not result["success"] or check.get("practice"):
+                result["npc_attack_damage"] = 0
+            elif type(damage) is int and 0 <= damage <= 300:
+                result["npc_attack_damage"] = damage
     return result
 
 
@@ -230,15 +236,17 @@ def rules_result(state, result):
         return {}
     check = result["check"]
     effect = check.get("effect")
+    attack_damage = result.get("npc_attack_damage")
     second_wind = check.get("kind") == "heal" and check.get("ability", "").casefold() == "второе дыхание"
-    if effect not in {"hero_damage", "hero_heal"} and not second_wind:
+    if effect not in {"hero_damage", "hero_heal"} and not second_wind and type(attack_damage) is not int:
         return {}
     hp = state.get("hp", 0)
     max_hp = state.get("max_hp", 1)
     if type(hp) is not int or type(max_hp) is not int:
         return {}
-    amount = max(0, result["total"])
-    after = max(0, min(max_hp, hp - amount if effect == "hero_damage" else hp + amount))
+    amount = max(0, attack_damage if type(attack_damage) is int else result["total"])
+    damage = effect == "hero_damage" or type(attack_damage) is int
+    after = max(0, min(max_hp, hp - amount if damage else hp + amount))
     return {"hp_before": hp, "hp_after": after, "max_hp": max_hp}
 
 

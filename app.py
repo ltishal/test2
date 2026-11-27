@@ -6,6 +6,7 @@ Railway:   gunicorn app:app -w 1 --threads 8 --timeout 300 --bind 0.0.0.0:$PORT
 """
 import os
 import re
+import unicodedata
 import json
 import random
 import secrets
@@ -36,16 +37,20 @@ from campaign import (
 
 from engine.turn_protocol import DeltaStream, PROTOCOL_PROMPT, validate_delta
 from engine.world import (WORLD_PROMPT, world_context, merge_entities, npc_damage,
-                          bind_damage_target, apply_npc_damage)
+                          bind_damage_target, apply_npc_damage, combat_ready)
 
 from engine.effects import (EFFECT_PROMPT, PASSIVE_OBSERVATION, resolve_effects, effect_context, check_bonus,
-                            control_restriction, hero_incapacitated, STATS)
+                            complete_hero_damage, control_restriction, hero_incapacitated, STATS)
+from engine.combat import (ARMOR, COMBAT_PROMPT, WEAPONS, combat_context, combat_turn, hero_defense, narrated_attacker,
+                           profile, safe_ability)
+from engine.economy import (TRADE_PROMPT, COINS, apply_exchange, apply_purchase, current_offers,
+                            exchange_from_story, merge_offers, trade_key, wallet_text)
 
 from party_store import PartyConflict, PartyMissing, PartyStore
 from token_usage import TokenUsage, state_turn_id
 
 BASE_DIR = Path(__file__).resolve().parent
-APP_REVISION = "2026-11-27.world-alpha2.1"
+APP_REVISION = "2026-11-27.world-alpha3"
 QWEN_SUMMARY_LIMIT = 480
 QWEN_STATE_LIMIT = 1100
 QWEN_STATE_SETUP_LIMIT = 2200
@@ -634,7 +639,7 @@ DEFAULT_STATE = {
 # Основные поля листа и краткие условия текущих квестов для мастера.
 STATE_FIELDS = ("name", "race", "class", "background", "level", "xp", "xp_next",
                 "hp", "max_hp", "gold", "silver", "copper", "stats", "conditions", "position",
-                "cover", "weapon_in_hand", "restrained")
+                "cover", "weapon_in_hand", "armor_equipped", "restrained")
 STATE_NOTE = ("[ЛИСТ ПОСЛЕ ПРЕДЫДУЩЕГО ОТВЕТА МАСТЕРА. "
               "Текущий ход игрока ещё не учтён. Используй числа отсюда.]\n")
 
@@ -1272,28 +1277,73 @@ def _signed_roll(message, state, history, *, party=None):
     return roll_result(active_check(state, history), roll)
 
 
-def _purchase(current, change, latest):
-    if not isinstance(change, dict) or not _grounded_event(change.get("evidence"), latest):
-        return False
-    currency, price, quantity = (change.get(key) for key in ("currency", "price", "quantity"))
-    name = change.get("item")
-    if (currency not in ("gold", "silver", "copper") or type(price) is not int or price <= 0
-            or type(quantity) is not int or quantity <= 0 or not _item_name(name)):
-        raise StateUnavailable("Не удалось сверить цену или количество покупки.")
-    price_before = current.get(currency, 0)
-    if type(price_before) is not int or price_before < price:
-        raise StateUnavailable("В листе недостаточно монет для описанной покупки.")
-    items = list(current.get("inventory") or [])
-    index = next((i for i, item in enumerate(items) if _item_name(item) == _item_name(name)), None)
-    if index is None:
-        items.append({"name": name.strip(), "quantity": quantity})
-    else:
-        item = items[index]
-        item = dict(item) if isinstance(item, dict) else {"name": item}
-        item["quantity"] = item.get("quantity", 1) + quantity
-        items[index] = item
-    current["inventory"], current[currency] = items, price_before - price
-    return True
+ENGINE_COMMANDS = {"/attack", "/cast", "/guard", "/retreat", "/wallet", "/shop", "/buy", "/exchange", "/equip"}
+
+
+def _engine_command(state, query, check):
+    command, _, argument = query.strip().partition(" ")
+    command, argument = command.casefold(), argument.strip()
+    if command not in ENGINE_COMMANDS:
+        return None
+    if command == "/wallet":
+        return {**state, "effect_log": []}, f"Кошелёк: {wallet_text(state)}."
+    offers = current_offers(state)
+    if command == "/shop":
+        prices = [f"• {offer['item']} — {offer['price']} {COINS[offer['currency']][0]}"
+                  for offer in offers]
+        return {**state, "effect_log": []}, ("Цены в этой локации:\n" + "\n".join(prices)
+                                             if prices else "Для этой локации пока нет подтверждённых цен. Спросите продавца.")
+    if state.get("character_setup_pending") or not (state.get("race") and state.get("class")):
+        raise ValueError("Сначала создайте персонажа.")
+    if check:
+        raise ValueError("Сначала разрешите или отмените ожидающую проверку.")
+    restriction = control_restriction(state, query)
+    if restriction:
+        raise ValueError(restriction)
+    if command in {"/attack", "/cast", "/guard", "/retreat"}:
+        updated, reply = combat_turn(state, command, argument)
+        updated["effect_log"] = []
+        if updated.get("xp") != state.get("xp"):
+            level = level_for_xp(updated["xp"])
+            old_level = state.get("level", 1)
+            updated.update(level=level, xp_next=xp_threshold_for_level(level),
+                           level_pending=state.get("level_pending", 0) + max(0, level - old_level))
+        return updated, reply
+    if combat_context(state):
+        raise ValueError("Торговля и смена экипировки доступны вне боя.")
+    updated = deepcopy(state)
+    updated["effect_log"] = []
+    if command == "/equip":
+        item = next((entry for entry in state.get("inventory", []) if _item_name(entry) == _item_name(argument)), None)
+        if not item:
+            raise ValueError("Укажите точное название предмета из инвентаря.")
+        name = item.get("name") if isinstance(item, dict) else item
+        normalized = trade_key(name)
+        if normalized in ARMOR:
+            updated["armor_equipped"] = name
+        elif normalized in WEAPONS:
+            updated["weapon_in_hand"] = name
+        else:
+            raise ValueError("У предмета пока нет характеристик экипировки.")
+        return updated, f"Экипировано: {name}. КБ героя: {hero_defense(updated)}."
+    if command == "/buy":
+        name, _, quantity_raw = argument.partition("|")
+        matches = [offer for offer in offers if trade_key(offer["item"]) == trade_key(name)]
+        if len(matches) != 1:
+            raise ValueError("Проверьте доступные товары через /shop и укажите точное название.")
+        quantity_raw = quantity_raw.strip()
+        if quantity_raw and (not quantity_raw.isascii() or not quantity_raw.isdigit() or len(quantity_raw) > 2):
+            raise ValueError("Укажите количество от 1 до 99 через |.")
+        quantity = int(quantity_raw or "1")
+        offer = matches[0]
+        return updated, apply_purchase(updated, {**offer, "quantity": quantity, "price": quantity * offer["price"]})
+    if not offers:
+        raise ValueError("Сначала уточните у торговца цену, чтобы подтвердить торговлю в этой локации.")
+    parts = argument.split()
+    if len(parts) != 3 or not re.fullmatch(r"[1-9][0-9]{0,5}", parts[1]):
+        raise ValueError("Формат: /exchange gold 1 silver.")
+    source, amount, target = parts
+    return updated, apply_exchange(updated, {"from": source, "to": target, "amount": int(amount)})
 
 
 def _apply_conditional_rewards(merged, current, newly_completed, outcomes, latest):
@@ -1430,7 +1480,8 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
     new_character = (current.get("character_setup_pending")
                      or not (current.get("race") and current.get("class")))
     state_limit = QWEN_STATE_SETUP_LIMIT if new_character or next_upgrade_level is not None else QWEN_STATE_LIMIT
-    state_messages = [{"role": "system", "content": STATE_EXTRACT_PROMPT + WORLD_PROMPT + EFFECT_PROMPT},
+    state_messages = [{"role": "system", "content": STATE_EXTRACT_PROMPT + WORLD_PROMPT + EFFECT_PROMPT
+                       + COMBAT_PROMPT + TRADE_PROMPT},
                       {"role": "user", "content": prompt}]
     if inline_delta is not None and not new_character:
         new_state = validate_delta(inline_delta)
@@ -1504,16 +1555,31 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
                                         campaign_scene, minute, grounded)
     effect_proposals = new_state.pop("effects", None)
     # Never trust direct writes to engine-owned fields, including legacy extraction.
-    for protected in ("active_effects", "effect_log", "mana", "max_mana", "hero_form"):
+    for protected in ("active_effects", "effect_log", "mana", "max_mana", "hero_form",
+                      "combat", "combat_rounds", "ability_cooldowns", "armor_equipped"):
         new_state.pop(protected, None)
     world_patches = new_state.pop("world_entities", None)
-    entities = merge_entities(current, world_patches, latest)
+    entities = merge_entities({**current, "scene": campaign_scene}, world_patches, latest)
     npc_outcome = npc_damage(current, result)
     new_state["world_entities"] = apply_npc_damage(entities, npc_outcome)
     proposed = new_state.pop("pending_check", None)
     cancellation = new_state.pop("cancel_check", None)
     cancel_check = (isinstance(cancellation, dict) and grounded(cancellation.get("evidence")))
-    next_check = pending_check(latest, proposed, campaign_scene)
+    attacker = narrated_attacker(entities, proposed, latest)
+    if attacker and (not proposed or isinstance(proposed, dict) and proposed.get("kind") in (None, "attack")):
+        proposed = {**(proposed or {}), "kind": "attack", "title": f"Атака: {attacker['name']}",
+                    "target": current.get("name", "Герой")}
+        next_check = pending_check(latest, proposed, campaign_scene, defense_dc=hero_defense(current))
+        if next_check:
+            practice = bool(re.search(r"учебн|спарринг|тренировоч", action + " " + latest, re.I))
+            combat_ready(attacker, "minor" if practice else "normal")
+            if type(attacker.get("hp")) is int:
+                attacker["combat_profile"] = profile(attacker)
+                attacker["location"] = campaign_scene.get("location") or attacker.get("location")
+                next_check["actor_id"] = attacker["id"]
+                next_check["practice"] = practice
+    else:
+        next_check = pending_check(latest, proposed, campaign_scene)
     previous_scene = current.get("scene")
     previous_location = previous_scene.get("location") if isinstance(previous_scene, dict) else None
     moved = bool(previous_location and previous_location != campaign_scene.get("location"))
@@ -1556,6 +1622,10 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
         used_ability = "" if resolved_check.get("charge_spent") else "Второе дыхание"
     if "abilities" in new_state:
         new_state["abilities"] = normalize_abilities(new_state["abilities"])
+        for entry in new_state["abilities"]:
+            data = entry.pop("mechanics", None)
+            if isinstance(data, dict) and (mechanics := safe_ability({**data, "name": entry["name"]})):
+                entry["mechanics"] = mechanics
     if not new_character:
         rest = rest if rest in ("short_rest", "long_rest") else ""
         used_ability = used_ability if isinstance(used_ability, str) else ""
@@ -1574,6 +1644,8 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
         if used_ability and not spent:
             raise StateUnavailable(f"Умение «{used_ability}» сейчас недоступно.")
         current["abilities"] = abilities
+        if rest == "long_rest" and type(current.get("max_mana")) is int:
+            current["mana"] = current["max_mana"]
 
     transfers = new_state.pop("item_transfers", None)
     if transfers and not new_character:
@@ -1588,12 +1660,38 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
                 new_state[field] = [item for item in new_state[field]
                                     if _item_name(item) not in transferred_names
                                     and (not isinstance(item, dict) or item.get("id") not in transferred_ids)]
+    trade_log = []
+    price_proposals = new_state.pop("shop_offers", None)
+    offers_at_scene = {**current, "scene": campaign_scene}
+    current["shop_offers"] = merge_offers(offers_at_scene, price_proposals, latest)
     purchase = new_state.pop("purchase", None)
-    if purchase and not new_character:
-        if not _purchase(current, purchase, latest):
-            raise StateUnavailable("Покупку не удалось подтвердить по ответу мастера.")
-        for field in ("inventory", "inventory_remove", "gold", "silver", "copper"):
-            new_state.pop(field, None)
+    exchange = new_state.pop("exchange", None)
+    if not new_character:
+        structured_exchange = exchange is not None
+        exchange = exchange if structured_exchange else exchange_from_story(action, latest)
+        if exchange:
+            for field in COINS:
+                new_state.pop(field, None)
+            try:
+                if structured_exchange and (not isinstance(exchange, dict) or not _grounded_event(exchange.get("evidence"), latest)):
+                    raise ValueError("Размен не удалось подтвердить по этому ходу.")
+                trade_log.append(apply_exchange(current, exchange))
+            except (ValueError, TypeError, AttributeError) as exc:
+                trade_log.append(f"Отклонено: {exc}")
+        if purchase:
+            for field in ("inventory", "inventory_remove", *COINS):
+                new_state.pop(field, None)
+            try:
+                if not isinstance(purchase, dict) or not _grounded_event(purchase.get("evidence"), latest):
+                    raise ValueError("Покупку не удалось подтвердить по этому ходу.")
+                quote = next((offer for offer in current_offers({**current, "scene": campaign_scene})
+                              if trade_key(offer["item"]) == trade_key(purchase.get("item"))), None)
+                if quote and (type(purchase.get("quantity")) is not int or purchase.get("currency") != quote["currency"]
+                              or purchase.get("price") != quote["price"] * purchase["quantity"]):
+                    raise ValueError("Цена покупки не совпадает с подтверждённой ценой продавца.")
+                trade_log.append(apply_purchase(current, purchase))
+            except ValueError as exc:
+                trade_log.append(f"Отклонено: {exc}")
     resources = new_state.pop("resource_events", {})
     resources = resources if isinstance(resources, dict) else {}
     if not new_character:
@@ -1768,8 +1866,13 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
         blocked = set()
         if rules_result(current, result): blocked.add("hero")
         if npc_outcome: blocked.add(npc_outcome["id"])
+        effect_proposals = effect_proposals if isinstance(effect_proposals, list) else []
+        if "hero" not in blocked:
+            effect_proposals = complete_hero_damage(current, action, latest, effect_proposals)
         merged = resolve_effects(merged, effect_proposals, latest, minute, blocked,
                                  hero_before=(current["hp"], merged["hp"]))
+        merged["effect_log"].extend(trade_log)
+        merged["combat"] = combat_context(merged)
         check = merged.get("pending_check")
         if check and check.get("kind") != "save" and hero_incapacitated(merged):
             merged["pending_check"] = check = None
@@ -1783,7 +1886,12 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
 
 # ─── Сохранения ────────────────────────────────────────────────────────────
 def _safe_name(raw):
-    return re.sub(r"[^a-zA-Z0-9_\-]", "", raw or "")
+    if not isinstance(raw, str):
+        return ""
+    normalized = re.sub(r"(?<!\d)\.|\.(?!\d)", "", unicodedata.normalize("NFC", raw))
+    name = " ".join("".join(char for char in normalized if char.isalnum() or char in " _-.—–").split())
+    name = name.encode("utf-8")[:128].decode("utf-8", errors="ignore").strip().rstrip(".")
+    return name if any(char.isalnum() for char in name) else ""
 
 
 def _save_path(cid, name):
@@ -1936,7 +2044,8 @@ def _revision(data):
 def _snapshot_response(snapshot):
     if isinstance(snapshot, dict) and isinstance(snapshot.get("draft"), dict):
         draft = snapshot["draft"]
-        snapshot = {**snapshot, "draft": {**draft, "reply": {k: v for k, v in draft["reply"].items() if k != "_state_delta"}}}
+        snapshot = {**snapshot, "draft": {**draft, "reply": {k: v for k, v in draft["reply"].items()
+                                                            if k not in {"_state_delta", "_engine_state"}}}}
     response = jsonify(snapshot)
     response.headers["Cache-Control"] = "no-store"
     return response
@@ -2039,6 +2148,12 @@ def api_roll():
         if party:
             roll.update(party_id=party["id"], revision=party["revision"])
         result = roll_result(check, roll)
+        if check and check.get("actor_id") and check.get("kind") == "attack" and result.get("success") and not check.get("practice"):
+            attacker = next((record for record in state.get("world_entities", [])
+                             if isinstance(record, dict) and record.get("id") == check["actor_id"]), None)
+            if attacker:
+                roll["npc_attack_damage"] = roll_dice(profile(attacker)["dice"])["total"]
+                result = roll_result(check, roll)
         result["receipt"] = ROLL_SIGNER.dumps(roll)
         return jsonify(result)
     except ValueError as e:
@@ -2092,6 +2207,18 @@ def api_chat():
             message for message in messages if message.get("role") != "system"
         ]
     check = active_check(game_state, history)
+    if party and not action.get("roll_receipt"):
+        try:
+            direct = _engine_command(game_state, action.get("content", ""), check)
+            if direct:
+                updated, narration = direct
+                staged = PARTIES.stage(owner, party["id"], party["revision"], request_id, action,
+                                       {"role": "assistant", "content": narration, "_engine_state": updated})
+                return Response(staged["reply"]["content"] + TURN_COMPLETE,
+                                mimetype="text/plain; charset=utf-8",
+                                headers={"Cache-Control": "no-store", "X-Turn-Id": request_id})
+        except ValueError as exc:
+            return jsonify({"error": str(exc), "code": "action_invalid"}), 400
     if action.get("content") == CANCEL_CHECK_COMMAND:
         if not check or check.get("kind") != "check":
             return jsonify({"error": "Нет необязательной проверки для отмены.", "code": "action_invalid"}), 400
@@ -2149,6 +2276,10 @@ def api_chat():
     state_context["journal"] = notes_context(game_state.get("notes"), lookup)
     state_context["world_entities"] = world_context(game_state, lookup, player_query=query)
     state_context["active_effects"] = effect_context(game_state)
+    if battle := combat_context(game_state):
+        state_context["combat"] = {field: battle[field] for field in ("target_id", "round", "hero_first") if field in battle}
+    if market := current_offers(game_state):
+        state_context["shop_offers"] = [{k: offer[k] for k in ("item", "currency", "price")} for offer in market[:8]]
     if isinstance(game_state.get("hero_form"), dict):
         state_context["hero_form"] = game_state["hero_form"]
     if type(game_state.get("mana")) is int:
@@ -2233,7 +2364,8 @@ def api_chat():
     }] + messages[1:]
     inline_enabled = bool(party and not setup_turn and next_upgrade_level is None and INLINE_STATE_ENABLED)
     if inline_enabled:
-        messages[0]["content"] += "\n\n" + PROTOCOL_PROMPT + STATE_EXTRACT_PROMPT + WORLD_PROMPT + EFFECT_PROMPT
+        messages[0]["content"] += ("\n\n" + PROTOCOL_PROMPT + STATE_EXTRACT_PROMPT + WORLD_PROMPT
+                                     + EFFECT_PROMPT + COMBAT_PROMPT + TRADE_PROMPT)
     else:
         messages[0]["content"] += "\nУчитывай active_effects; тики рассчитывает сервер. Используй npc_rule_effect как окончательный результат урона существу, если он указан."
     turn_id = request_id or uuid4().hex
@@ -2455,7 +2587,10 @@ def _commit_party_turn(data):
     state = party["state"]
     delta = draft["reply"].get("_state_delta") if INLINE_STATE_ENABLED else None
     roll = draft["action"].get("roll")
-    if delta is not None:
+    engine_state = draft["reply"].get("_engine_state")
+    if isinstance(engine_state, dict):
+        updated = engine_state
+    elif delta is not None:
         try:
             updated = extract_state(history, state, request_id, roll, inline_delta=delta)
             print(f"[state] mode=inline turn={request_id}", flush=True)
@@ -2467,6 +2602,7 @@ def _commit_party_turn(data):
         updated = extract_state(history, state, request_id, roll)
     reply = dict(draft["reply"])
     reply.pop("_state_delta", None)
+    reply.pop("_engine_state", None)
     details = []
     for key, label, unit in (("xp", "Опыт", " XP"), ("gold", "Золото", " зм"),
                              ("silver", "Серебро", " см"), ("copper", "Медь", " мм")):
@@ -2486,7 +2622,7 @@ def _commit_party_turn(data):
     next_check = updated.get("pending_check")
     prior_check = active_check(state, party["messages"])
     effect_log = updated.get("effect_log") or []
-    if any(re.match(r"Эффект \d+ не применён:", line) for line in effect_log):
+    if any(re.match(r"Эффект \d+ не применён:|Отклонено:", line) for line in effect_log):
         reply["content"] = "Сцена продолжается. Подтверждённый результат хода указан ниже."
         location = (updated.get("scene") or {}).get("location")
         if location:
