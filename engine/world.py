@@ -167,6 +167,38 @@ def merge_entities(state, proposals, reply):
     return result
 
 
+ROLE_NAME = re.compile(r"\b((?i:торговец|купец|страж(?:ник)?|сторож))\s+([А-ЯЁ][а-яё-]{2,30})\b")
+ROLE_NAME_REVERSED = re.compile(r"\b([А-ЯЁ][а-яё-]{2,30})\s*(?:,\s*|[—–]\s*)(?:(?i:портовый)\s+)?((?i:торговец|купец|страж(?:ник)?|сторож))\b")
+
+
+def restore_scene_people(entities, scene, reply, previous_scene=None):
+    """Store explicit role/name introductions when the service delta omits them."""
+    location = scene.get('location') if isinstance(scene, dict) else None
+    if not location:
+        return entities
+    if isinstance(previous_scene, dict) and previous_scene.get('location') and re.search(
+            r'\b(?:оба|обе|они)\b[^.]{0,50}\bоста[лются]+\w*\s+позади', reply, re.I):
+        location = previous_scene['location']
+    found = [(m[1], m[2]) for m in ROLE_NAME.finditer(reply)]
+    found.extend((m[2], m[1]) for m in ROLE_NAME_REVERSED.finditer(reply))
+    roles = {'торговец': 'торговец', 'купец': 'торговец', 'страж': 'страж',
+             'стражник': 'страж', 'сторож': 'сторож'}
+    for role, name in found:
+        role = roles[role.casefold()]
+        local = [entry for entry in entities if entry.get('kind') == 'npc'
+                 and any(key(name) == key(alias) for alias in entity_names(entry))
+                 and key(entry.get('location')) == key(location)]
+        if any(role in key(' '.join(str(entry.get(k, '')) for k in ('name', 'traits', 'description', 'role'))) for entry in local):
+            continue
+        if len(local) == 1 and not local[0].get('role') and not any(
+                token in key(str(local[0].get('description', ''))) for token in roles):
+            local[0]['role'] = role
+            continue
+        entities.append({'id': uuid4().hex, 'kind': 'npc', 'name': name, 'location': location,
+                         'description': role.capitalize() + '.', 'role': role, 'life_state': 'alive'})
+    return entities
+
+
 def world_context(state, query, limit=12, *, player_query=None):
     """Small relevant subset, independent of total saved world size."""
     scene = state.get('scene') or {}
@@ -221,7 +253,7 @@ def world_context(state, query, limit=12, *, player_query=None):
         if len(selected) >= limit:
             break
         entry = {k: text(e.get(k), n) for k,n in {'id':80,'name':160,'kind':30,'description':260,
-                 'location':180,'traits':160,'status':120,'threat':30,'form':120,'environment':160,'access':24}.items() if isinstance(e.get(k),str)}
+                 'location':180,'role':40,'traits':160,'status':120,'threat':30,'form':120,'environment':160,'access':24}.items() if isinstance(e.get(k),str)}
         if isinstance(e.get('aliases'), list):
             entry['aliases'] = entity_names(e)[1:5]
         entry.update({k:e[k] for k in ('hp','max_hp','mana','max_mana','attitude') if type(e.get(k)) is int})

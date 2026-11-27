@@ -336,3 +336,36 @@ class InlineIntegrationTest(unittest.TestCase):
                 with self.assertRaises(BudgetExceeded): self.m._paid_completion(messages=[{'content':'x'}],max_tokens=10)
             with patch.multiple(self.m,client=fake),patch.dict(os.environ,{'API_ENABLED':'0'}):
                 with self.assertRaisesRegex(BudgetExceeded,'отключена'): self.m._paid_completion(messages=[],max_tokens=1)
+
+    def test_confirmed_long_rest_restores_health_and_keeps_new_damage(self):
+        state = {**self.m.DEFAULT_STATE, 'name': 'Ива', 'race': 'человек', 'class': 'маг',
+                 'hp': 3, 'max_hp': 7, 'mana': 10, 'max_mana': 12, 'world_minute': 1088}
+        finished = 'Долгий отдых завершён.'
+        incident = 'Дротик наносит Иве 1 HP урона.'
+        reply = finished + ' ' + incident
+        history = [{'role': 'user', 'content': 'Отдыхаю.'}, {'role': 'assistant', 'content': reply}]
+        changes = {'rest_event': {'kind': 'long_rest', 'evidence': finished},
+                   'effects': [{'type': 'damage', 'target': 'hero', 'amount': 1, 'evidence': incident}]}
+        updated = self.m.extract_state(history, state, inline_delta=changes)
+        self.assertEqual((updated['hp'], updated['mana']), (6, 12))
+
+    def test_custom_recipe_registered_and_learned_by_server_command(self):
+        state = {**self.m.DEFAULT_STATE, 'name': 'Ива', 'race': 'человек', 'class': 'маг', 'world_minute': 1088}
+        reply = 'Тренер записал проект «Рывок тени».'
+        item = {'kind': 'ability', 'name': 'Рывок тени', 'evidence': reply,
+                'mechanics': {'dice': '1d4', 'element': 'shadow', 'cost': 2, 'cooldown': 2}}
+        history = [{'role': 'user', 'content': 'Разрабатываю способность.'}, {'role': 'assistant', 'content': reply}]
+        catalog = self.m.extract_state(history, state, inline_delta={'blueprints': [item]})
+        self.assertIn('Рывок тени', self.m._engine_command(catalog, '/design', None)[1])
+        learned, response = self.m._engine_command(catalog, '/learn Рывок тени', None)
+        self.assertIn('Изучено', response)
+        self.assertEqual(learned['world_minute'], 1098)
+        self.assertEqual(learned['abilities'][0]['mechanics']['cooldown'], 2)
+        self.assertEqual(catalog['abilities'], [])
+
+    def test_memory_distinguishes_intent_from_committed_trade(self):
+        dialogue = self.m._dialogue_messages([
+            {'role': 'user', 'content': 'Покупаю паёк.'},
+            {'role': 'assistant', 'content': 'Сцена продолжается.', 'resolution': 'Отклонено: покупка не состоялась.'},
+        ])
+        self.assertIn('[Итог движка] Отклонено', dialogue[1]['content'])

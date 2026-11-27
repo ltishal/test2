@@ -144,6 +144,11 @@ def complete_hero_damage(state, action, reply, proposals):
     if competing:
         return proposals
     recovered = damage_from_story(state, action, reply)
+    if recovered and damage:
+        unconfirmed = [entry for entry in damage if not grounded_effect_evidence(entry.get("evidence"), reply)]
+        if len(unconfirmed) == len(damage) and sorted(entry['amount'] for entry in recovered) == sorted(
+                entry.get('amount') for entry in damage if type(entry.get('amount')) is int):
+            return [*recovered, *(entry for entry in proposals if entry not in unconfirmed)]
     if not recovered or damage and len(recovered) < 2:
         return proposals
     matched = set()
@@ -158,6 +163,15 @@ def complete_hero_damage(state, action, reply, proposals):
     if not missing:
         return proposals
     return [*proposals, *missing]
+
+
+def grounded_effect_evidence(value, reply):
+    phrase = text(value, 600)
+    if len(phrase) < 5:
+        return False
+    strip = lambda source: " ".join(re.sub(r"[*_`]", "", source).split())
+    normalized = strip(phrase)
+    return len(normalized) >= 5 and normalized in strip(reply)
 
 def _apply(state, p, minute, evidence, blocked_hp):
     typ=p.get('type'); need(isinstance(typ,str) and typ in LABELS,'Неизвестный тип эффекта')
@@ -281,7 +295,7 @@ def resolve_effects(state, proposals, reply, minute, blocked_hp=(), hero_before=
     for i,p in enumerate(proposals[:MAX_EFFECTS] if isinstance(proposals,list) else []):
         try:
             need(isinstance(p,dict),'Нужен объект эффекта')
-            evidence=text(p.get('evidence'),600); need(len(evidence)>=5 and evidence in reply,'Нет подтверждения в повествовании')
+            evidence=text(p.get('evidence'),600); need(grounded_effect_evidence(evidence, reply),'Нет подтверждения в повествовании')
             if p.get('type') == 'dispel' and isinstance(p.get('effect_id'), str) and p['effect_id'] in expiring:
                 continue  # The clock already removed this specific effect in the same turn.
             trial=deepcopy(state)

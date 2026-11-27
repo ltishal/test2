@@ -323,7 +323,7 @@ def combat_turn(original, command, argument, roller=None):
                 if prepared is not None:
                     state.update({field: prepared[field] for field in ("abilities", "mana", "max_mana") if field in prepared})
                     state["ability_cooldowns"] = ready_cooldowns
-                stat = "int" if command == "/cast" else move.get("stat","str")
+                stat = state.get("casting_stat", "int") if command == "/cast" else move.get("stat", "str")
                 log.append(strike(state, target, move, 2 + hero_stat(state, stat) + check_bonus(state,stat),
                                   enemy["defense"] + (2 if enemy_guard else 0), enemy["resistances"], roller))
             continue

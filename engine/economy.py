@@ -1,6 +1,7 @@
 """Server-owned coin arithmetic and location-scoped trade offers."""
 import re
 from copy import deepcopy
+from uuid import uuid4
 
 COINS = {"gold": ("зм", 100), "silver": ("см", 10), "copper": ("мм", 1)}
 LIMIT = 1_000_000
@@ -33,7 +34,13 @@ def amount(value):
 
 def grounded(proposal, reply):
     evidence = proposal.get("evidence") if isinstance(proposal, dict) else None
-    return isinstance(evidence, str) and len(evidence.strip()) >= 5 and evidence.strip() in reply
+    if not isinstance(evidence, str) or len(evidence.strip()) < 5:
+        return False
+    return proof_text(evidence) in proof_text(reply) and len(proof_text(evidence)) >= 5
+
+
+def proof_text(value):
+    return " ".join(re.sub(r"[*_`]", "", value).split()).strip(" «»“”\"")
 
 
 def trade_key(name):
@@ -47,10 +54,61 @@ def trade_evidence(proposal, reply, *, quantity=1):
     # Inflection-tolerant stem match for meaningful item words, no unrelated quote.
     if not name or not all(word[:max(3,len(word)-2)] in evidence for word in re.findall(r'\w+',name) if len(word)>=3): return False
     if not any(c==proposal.get('currency') and n==proposal.get('price') for c,n in coin_mentions(evidence)): return False
-    if not re.search(r'сто[ия]|цен|прода|куп|отда|покуп|предлага|за\s', evidence): return False
+    if not re.search(r'сто[ия]|цен|прода|куп|отда|покуп|предлага|за\s|[—–:]', evidence): return False
     if re.search(r'\b(?:не прода|не куп|не отда|отказ|если|может)\w*',evidence): return False
-    if quantity>1 and not re.search(rf'(?<!\d){quantity}(?!\d)\s*(?:шт|ед|порц|предмет)',evidence): return False
+    if quantity>1 and stated_stock(evidence) != quantity: return False
     return True
+
+
+STOCK = re.compile(rf"\b({COUNT})\s*(?:шт\.?|штук\w*|единиц\w*|порци\w*|предмет\w*|пайк\w*)", re.I)
+EXPLICIT_QUOTE = re.compile(
+    rf"(?:^|[«\"\n]|[:.]\s+)([А-Яа-яЁё0-9][^«»\"\n:.,;—–]{{1,75}}?)\s+"
+    rf"(?:стоит\s+|[—–]\s*)({COUNT})\s+(золот\w*|серебрян\w*|медн\w*|зм|см|мм)\b", re.I
+)
+
+
+def stated_stock(value):
+    match = STOCK.search(value)
+    if not match:
+        return None
+    count = match[1].casefold()
+    return int(count) if count.isdigit() else WORDS[count]
+
+
+def offers_from_story(reply):
+    """Recover explicitly priced items from a sign or a merchant's quote."""
+    if not re.search(r"торгов|продав|лавк|прилав|таблич|прайс", reply, re.I):
+        return []
+    quotes = []
+    clean = proof_text(reply)
+    for match in EXPLICIT_QUOTE.finditer(clean):
+        name = match[1].strip()
+        price = coin_mentions(match[0])
+        if not price or len(name.split()) > 6 or re.search(r"\b(?:если|может|не|доступно|нужно)\b", name, re.I):
+            continue
+        tail = clean[match.end():match.end()+125]
+        stock_match = re.search(r"в наличии\s+([^.!?;]{1,36})", tail, re.I)
+        stock = stated_stock(stock_match[1]) if stock_match else None
+        evidence = clean[match.start():match.end() + (stock_match.end() if stock_match else 0)].strip(' «»":')
+        currency, amount = price[0]
+        quotes.append({"item": name, "currency": currency, "price": amount, "stock": stock or 1,
+                       "stock_explicit": stock is not None, "evidence": evidence})
+    return quotes[:6]
+
+
+def confirmed_purchase(proposal, reply):
+    if not isinstance(proposal, dict):
+        return None
+    if trade_evidence(proposal, reply, quantity=proposal.get('quantity', 1) if type(proposal.get('quantity')) is int else 1):
+        return proposal
+    name = trade_key(proposal.get('item'))
+    if not name or not re.search(r"покупк\w* состоял|\b(?:покупа\w*|принима\w* монет|переда\w* па[её]к|прода\w*)\b", reply, re.I):
+        return None
+    for sentence in re.split(r"(?<=[.!?])\s+|\n+", reply):
+        candidate = {**proposal, 'evidence': sentence}
+        if trade_evidence(candidate, reply, quantity=proposal.get('quantity', 1) if type(proposal.get('quantity')) is int else 1):
+            return candidate
+    return None
 
 
 def settle_offer(state, offer, quantity):
@@ -150,9 +208,11 @@ def merge_offers(state, proposed, reply):
     offers = [offer for offer in state.get("shop_offers", []) if isinstance(offer, dict)] if isinstance(state.get("shop_offers"), list) else []
     scene = state.get("scene")
     location = scene.get("location") if isinstance(scene, dict) else ""
-    if not isinstance(proposed, list) or not trade_key(location):
+    if not trade_key(location):
         return offers
-    for quote in proposed[:10]:
+    proposals = proposed[:10] if isinstance(proposed, list) else []
+    accepted = set()
+    for quote in [*proposals, *offers_from_story(reply)]:
         if not trade_evidence(quote, reply):
             continue
         name, coin, price = (quote.get(k) for k in ("item", "currency", "price"))
@@ -167,12 +227,20 @@ def merge_offers(state, proposed, reply):
             if not seller or trade_key(seller['name']) not in trade_key(quote['evidence']): continue
         stock=quote.get('stock',1)
         if type(stock) is not int or not 1<=stock<=99: continue
-        if stock>1 and not re.search(rf'(?<!\d){stock}(?!\d)\s*(?:шт|ед|порц|предмет)',quote['evidence'],re.I): continue
+        if stock>1 and stated_stock(quote['evidence']) != stock: continue
         identity = (trade_key(location), trade_key(name),seller_id)
+        if not seller_id and (identity[:2] in accepted or any(
+                trade_key(old.get("location")) == identity[0] and trade_key(old.get("item")) == identity[1]
+                and old.get("seller_id") for old in offers)):
+            continue
+        previous = next((old for old in offers if (trade_key(old.get("location")), trade_key(old.get("item")),
+                                                   old.get("seller_id")) == identity), None)
+        if previous and not quote.get('stock_explicit') and not stated_stock(quote['evidence']):
+            stock = previous.get('stock', stock)
         offers = [old for old in offers if (trade_key(old.get("location")), trade_key(old.get("item")),old.get("seller_id")) != identity]
-        from uuid import uuid4
         offers.append({"location": location, "item": name.strip(), "currency": coin, "price": price,
-                       "seller_id":seller_id,"stock":stock,"offer_id":uuid4().hex})
+                       "seller_id":seller_id,"stock":stock,"offer_id":(previous or {}).get('offer_id') or uuid4().hex})
+        accepted.add(identity[:2])
     return offers[-100:]
 
 

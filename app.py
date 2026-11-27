@@ -38,22 +38,25 @@ from campaign import (
 from engine.clock import advance_action
 from engine.equipment import item_spec, equipment_spec
 from engine.api_budget import ApiBudget, BudgetExceeded, estimated_units
+from engine.constructor import (CONSTRUCTOR_PROMPT, TYPES, apply_blueprints, apply_character_blueprints, recipe_matches,
+                                attach_item_blueprints, attach_learned_spell, constructor_context,
+                                learn_blueprint, learned_spell_from_story, recipes)
 from engine.turn_protocol import DeltaStream, PROTOCOL_PROMPT, validate_delta
 from engine.world import (WORLD_PROMPT, world_context, merge_entities, npc_damage,
-                          bind_damage_target, apply_npc_damage, combat_ready, sync_life)
+                          bind_damage_target, apply_npc_damage, combat_ready, sync_life, restore_scene_people)
 
 from engine.effects import (EFFECT_PROMPT, PASSIVE_OBSERVATION, resolve_effects, effect_context, check_bonus,
                             complete_hero_damage, control_restriction, hero_incapacitated, STATS)
 from engine.combat import (ARMOR, COMBAT_PROMPT, WEAPONS, combat_context, combat_turn, hero_defense, narrated_attacker,
                            profile, safe_ability)
 from engine.economy import (TRADE_PROMPT, COINS, apply_exchange, apply_purchase, current_offers,
-                            exchange_from_story, merge_offers, trade_key, wallet_text, trade_evidence, settle_offer)
+                            confirmed_purchase, exchange_from_story, merge_offers, trade_key, wallet_text, settle_offer)
 
 from party_store import PartyConflict, PartyMissing, PartyStore
 from token_usage import TokenUsage, state_turn_id
 
 BASE_DIR = Path(__file__).resolve().parent
-APP_REVISION = "2026-11-27.world-alpha3.1"
+APP_REVISION = "2026-11-27.world-alpha4"
 QWEN_SUMMARY_LIMIT = 480
 QWEN_STATE_LIMIT = 1100
 QWEN_STATE_SETUP_LIMIT = 2200
@@ -638,6 +641,7 @@ STATE_EXTRACT_PROMPT = """
 
 
 SUMMARY_PROMPT = """
+Храни итоги движка как подтверждённые события. Намерения игрока и отклонённые покупки не являются свершившимися действиями.
 Обнови краткую память кампании по прежнему резюме и новым событиям. Сохрани имена и принадлежность NPC, решения, обещания, условия и награды открытых квестов, важные предметы и зацепки. Привязывай события к месту и квесту, отмечай уже закрытые задачи и выданные награды. Укажи последнее место и открытую угрозу. Замени устаревшее, объедини дубли. Не сочиняй нового. До 10 коротких пунктов, без пересказа реплик, описаний внешности, бросков и текущих чисел листа.
 """
 
@@ -731,9 +735,16 @@ def _budgeted_dialogue(messages, max_chars, preserve_latest=False):
 
 
 def _dialogue_messages(messages):
-    return [{"role": message["role"], "content": message["content"]} for message in messages
-            if isinstance(message, dict) and message.get("role") in ("user", "assistant")
-            and isinstance(message.get("content"), str)]
+    dialogue = []
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") not in ("user", "assistant") or not isinstance(message.get("content"), str):
+            continue
+        role, content = message["role"], message["content"]
+        resolution = message.get("resolution")
+        if role == "assistant" and isinstance(resolution, str) and resolution:
+            content += "\n[Итог движка] " + resolution[:550]
+        dialogue.append({"role": role, "content": content})
+    return dialogue
 
 
 def _recent_dialogue(dialogue):
@@ -1299,7 +1310,7 @@ def _signed_roll(message, state, history, *, party=None):
     return roll_result(active_check(state, history), roll)
 
 
-ENGINE_COMMANDS = {"/attack", "/cast", "/guard", "/retreat", "/wallet", "/shop", "/buy", "/exchange", "/equip"}
+ENGINE_COMMANDS = {"/attack", "/cast", "/guard", "/retreat", "/wallet", "/shop", "/buy", "/exchange", "/equip", "/design", "/learn"}
 
 
 def _engine_command(state, query, check):
@@ -1309,6 +1320,19 @@ def _engine_command(state, query, check):
         return None
     if command == "/wallet":
         return {**state, "effect_log": []}, f"Кошелёк: {wallet_text(state)}."
+    if command == "/design":
+        rows = recipes(state)
+        if argument:
+            matches = recipe_matches(state, argument)
+            if len(matches) != 1:
+                raise ValueError("Укажите точное название или ID проекта.")
+            row = matches[0]
+            details = row.get("description") or ""
+            mechanics = json.dumps(row.get("mechanics") or {}, ensure_ascii=False)
+            return {**state, "effect_log": []}, f"{TYPES[row['kind']]}: {row['name']}. {details}\n{mechanics}"
+        lines = [f"{TYPES[row['kind']]}: {row['name']} · {row['id']}" for row in rows[-20:]]
+        return {**state, "effect_log": []}, ("Проекты этой партии:\n" + "\n".join(lines) if lines
+                                            else "Список проектов пуст. Опишите мастеру, что хотите разработать.")
     offers = current_offers(state)
     if command == "/shop":
         prices = [f"• {offer['item']} — {offer['price']} {COINS[offer['currency']][0]} · в наличии: {offer.get('stock',1)} · ID: {offer.get('offer_id','—')}"
@@ -1334,6 +1358,9 @@ def _engine_command(state, query, check):
         raise ValueError("Торговля и смена экипировки доступны вне боя.")
     updated = deepcopy(state)
     updated["effect_log"] = []
+    if command == "/learn":
+        reply = learn_blueprint(updated, argument)
+        return advance_action(updated, 600), reply
     if command == "/equip":
         matches=[entry for entry in state.get('inventory',[]) if _item_name(entry)==_item_name(argument) or isinstance(entry,dict) and entry.get('id')==argument]
         item=matches[0] if len(matches)==1 else None
@@ -1466,6 +1493,7 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
     model_state["facts"] = facts_context(current.get("facts"), action + " " + latest)
     model_state["world_entities"] = world_context(current, action + " " + latest, player_query=action)
     model_state["active_effects"] = effect_context(current)
+    model_state["constructor"] = constructor_context(current, action)
     active_events = [event for event in (current.get("agenda") or [])
                      if isinstance(event, dict) and event.get("status") == "scheduled"]
     model_state["agenda"] = active_events[:12]
@@ -1507,7 +1535,7 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
                      or not (current.get("race") and current.get("class")))
     state_limit = QWEN_STATE_SETUP_LIMIT if new_character or next_upgrade_level is not None else QWEN_STATE_LIMIT
     state_messages = [{"role": "system", "content": STATE_EXTRACT_PROMPT + WORLD_PROMPT + EFFECT_PROMPT
-                       + COMBAT_PROMPT + TRADE_PROMPT},
+                       + COMBAT_PROMPT + TRADE_PROMPT + CONSTRUCTOR_PROMPT},
                       {"role": "user", "content": prompt}]
     if inline_delta is not None and not new_character:
         new_state = validate_delta(inline_delta)
@@ -1586,8 +1614,12 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
     for protected in ("active_effects", "effect_log", "mana", "max_mana", "hero_form",
                       "combat", "combat_rounds", "ability_cooldowns", "armor_equipped", "world_second", "life_state", "weapon_equipped_id", "armor_equipped_id"):
         new_state.pop(protected, None)
+    blueprint_proposals = new_state.pop("blueprints", None)
+    for field in ("constructor", "casting_stat", "character_blueprints"):
+        new_state.pop(field, None)
     world_patches = new_state.pop("world_entities", None)
     entities = merge_entities({**current, "scene": campaign_scene}, world_patches, latest)
+    restore_scene_people(entities, campaign_scene, latest, current.get("scene"))
     npc_outcome = npc_damage(current, result)
     new_state["world_entities"] = apply_npc_damage(entities, npc_outcome)
     proposed = new_state.pop("pending_check", None)
@@ -1710,7 +1742,8 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
             for field in ("inventory", "inventory_remove", *COINS):
                 new_state.pop(field, None)
             try:
-                if not isinstance(purchase, dict) or not trade_evidence(purchase,latest,quantity=purchase.get("quantity",1) if type(purchase.get("quantity")) is int else 1):
+                purchase = confirmed_purchase(purchase, latest)
+                if not purchase:
                     raise ValueError("Покупку не удалось подтвердить по этому ходу.")
                 candidates = [offer for offer in current_offers({**current, "scene": campaign_scene, "world_entities": entities})
                               if trade_key(offer["item"]) == trade_key(purchase.get("item"))
@@ -1867,6 +1900,8 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
         ))
         if applied:
             merged["hp"] = applied["hp_after"]
+        elif rest == "long_rest" and before > 0:
+            merged["hp"] = current.get("max_hp", DEFAULT_STATE["max_hp"])
         else:
             merged["hp"] = before + delta if type(delta) is int and grounded else before
         merged["max_hp"] = current.get("max_hp", DEFAULT_STATE["max_hp"])
@@ -1901,7 +1936,13 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
             if spec: item['mechanics']=spec
             else: item.pop('mechanics',None)
     merged["notes"] = [n for n in (normalize_note(x) for x in merged["notes"]) if n]
+    proposed_spells = learned_spell_from_story(latest)
+    blueprints = blueprint_proposals if isinstance(blueprint_proposals, list) else []
+    design_log = apply_blueprints(merged, [*blueprints, *proposed_spells], latest)
+    attach_learned_spell(merged, proposed_spells)
+    attach_item_blueprints(merged)
     if new_character:
+        apply_character_blueprints(merged)
         merged.pop("character_setup_pending", None)
     else:
         blocked = set()
@@ -1910,8 +1951,9 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
         effect_proposals = effect_proposals if isinstance(effect_proposals, list) else []
         if "hero" not in blocked:
             effect_proposals = complete_hero_damage(current, action, latest, effect_proposals)
+        hp_base = merged["hp"] if rest == "long_rest" else current["hp"]
         merged = resolve_effects(merged, effect_proposals, latest, minute, blocked,
-                                 hero_before=(current["hp"], merged["hp"]))
+                                 hero_before=(hp_base, merged["hp"]))
         if ((minute == previous_minute or previous_minute is None) and not plan
                 and not (resolved_previous and previous_check.get('clock_spent'))):
             logs=merged.get('effect_log',[])[:]
@@ -1929,6 +1971,7 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
             if isinstance(stat, str) and stat in STATS and check.get("kind") in ("check", "attack", "save"):
                 check["stat"] = stat
                 check["effect_bonus"] = check_bonus(merged, stat)
+    merged["effect_log"] = [*(merged.get("effect_log") or []), *design_log]
     return merged
 
 
@@ -2260,7 +2303,7 @@ def api_chat():
     if party or messages[0].get("role") != "system":
         prompt = SYSTEM_PROMPT
         if setup_turn:
-            prompt += CHARACTER_CREATION_RULES
+            prompt += CHARACTER_CREATION_RULES + "\nДля авторской расы или класса используй в листе базовые характеристики, чтобы конструктор мог применить бонусы один раз."
         messages = [{"role": "system", "content": prompt}] + [
             message for message in messages if message.get("role") != "system"
         ]
@@ -2334,6 +2377,13 @@ def api_chat():
     state_context["journal"] = notes_context(game_state.get("notes"), lookup)
     state_context["world_entities"] = world_context(game_state, lookup, player_query=query)
     state_context["active_effects"] = effect_context(game_state)
+    resolutions = [message["resolution"][:220] for message in history[-32:]
+                   if message.get("role") == "assistant" and isinstance(message.get("resolution"), str)
+                   and any(marker in message["resolution"] for marker in ("Отклонено:", "Размен выполнен:", "Куплено:"))]
+    if resolutions:
+        state_context["verified_trades"] = resolutions[-5:]
+    if designs := constructor_context(game_state, query):
+        state_context["constructor"] = designs
     rounds=game_state.get('combat_rounds',0)
     cooldowns=game_state.get('ability_cooldowns')
     if type(rounds) is int and isinstance(cooldowns,dict):
@@ -2406,6 +2456,7 @@ def api_chat():
             state_context.pop("name")
     # Для создания героя формат задаёт CHARACTER_CREATION_RULES.
     turn_rule = ("Используй roll_result как окончательный результат именно указанной проверки. "
+                 "verified_trades и [Итог движка] подтверждают состояние. Отклонённая покупка не состоялась. "
                  "Если указан rule_effect, используй рассчитанный HP и не применяй изменение повторно. "
                  "Свободный бросок без check не разрешает действие. При pending_check сохраняй "
                  "ожидание, пока действие имеет смысл. Если игрок достиг цели другим способом или ушёл, "
@@ -2431,7 +2482,7 @@ def api_chat():
     inline_enabled = bool(party and not setup_turn and next_upgrade_level is None and INLINE_STATE_ENABLED)
     if inline_enabled:
         messages[0]["content"] += ("\n\n" + PROTOCOL_PROMPT + STATE_EXTRACT_PROMPT + WORLD_PROMPT
-                                     + EFFECT_PROMPT + COMBAT_PROMPT + TRADE_PROMPT)
+                                     + EFFECT_PROMPT + COMBAT_PROMPT + TRADE_PROMPT + CONSTRUCTOR_PROMPT)
     else:
         messages[0]["content"] += "\nУчитывай active_effects; тики рассчитывает сервер. Используй npc_rule_effect как окончательный результат урона существу, если он указан."
     turn_id = request_id or uuid4().hex

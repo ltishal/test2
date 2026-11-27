@@ -1056,7 +1056,7 @@ function renderStatus() {
     </div>
     <div class="status-chips">
       ${state.scene?.location ? '<span class="status-chip">📍 ' + esc(state.scene.location) + '</span>' : ''}
-      ${Number.isInteger(state.world_minute) ? '<span class="status-chip">⌛ ' + esc(worldTime(state.world_minute)) + '</span>' : ''}
+      ${Number.isInteger(state.world_minute) ? '<span class="status-chip">⌛ ' + esc(worldTime(state.world_minute, state.world_second)) + '</span>' : ''}
       <span class="status-chip">Ур. ${state.level}</span>
       ${state.level_pending ? `<span class="status-chip" title="Обсуди повышение с мастером">⬆ Повышение!</span>` : ''}
       <span class="status-chip">💰 ${formatCoins(state, true)}</span>
@@ -1527,7 +1527,9 @@ function handleCommand(cmd, arg) {
     case '/shop':
     case '/buy':
     case '/exchange':
-    case '/equip': {
+    case '/equip':
+    case '/design':
+    case '/learn': {
       const action = arg ? cmd + ' ' + arg : cmd;
       addMsg('user', action);
       return callAI({role: 'user', content: action});
@@ -1543,10 +1545,11 @@ function handleCommand(cmd, arg) {
     default: addMsg('system', `Неизвестная команда: ${cmd}. Введите /help.`);
   }
 }
-function worldTime(minute) {
+function worldTime(minute, second) {
   const hh = String(Math.floor(minute % 1440 / 60)).padStart(2, '0');
   const mm = String(minute % 60).padStart(2, '0');
-  return 'День ' + (Math.floor(minute / 1440) + 1) + ', ' + hh + ':' + mm;
+  const ss = Number.isInteger(second) && second >= 0 && second < 60 ? ':' + String(second).padStart(2, '0') : '';
+  return 'День ' + (Math.floor(minute / 1440) + 1) + ', ' + hh + ':' + mm + ss;
 }
 
 function waitForScene(target) {
@@ -2361,6 +2364,7 @@ function doHelp() {
     '<code>/notes</code> — заметки, письма, документы<br>' +
     '<code>/world</code> — энциклопедия открытого мира<br><code>/effects</code> — активные эффекты<br>' +
     '<code>/attack цель</code> — атака, <code>/cast умение | цель</code> — способность, <code>/guard</code> — защита, <code>/retreat</code> — отступление<br>' +
+    '<code>/design</code> — проекты партии, <code>/design имя</code> — правила проекта, <code>/learn имя</code> — изучить способность<br>' +
     '<code>/equip предмет</code> — экипировать, <code>/wallet</code> — кошелёк, <code>/shop</code> — цены, <code>/buy товар | количество</code> — покупка, <code>/exchange gold 1 silver</code> — размен<br>' +
     '<code>/wait</code> — время и события. <code>/wait next</code> — до ближайшего события<br>' +
     '<code>/save имя</code> — сохранить<br><code>/load имя</code> — загрузить<br>' +
