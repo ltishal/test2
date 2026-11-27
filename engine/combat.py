@@ -7,7 +7,7 @@ from campaign import ability_key, apply_ability_event, formula_key, pending_chec
 from engine.effects import change_pool, effect_context, check_bonus, hero_incapacitated
 from engine.clock import advance_action
 from engine.equipment import equipped, item_spec, require_ammo, consume_ammo, WEAPONS, ARMOR
-from engine.world import combat_ready, encounter_position, entity_names, key, records, text, is_present
+from engine.world import combat_ready, encounter_position, entity_names, key, records, text, is_present, life_state
 
 ELEMENTS = {"physical", "fire", "cold", "lightning", "poison", "arcane", "radiant", "shadow"}
 STYLE = {"balanced", "aggressive", "defensive", "caster"}
@@ -150,17 +150,94 @@ def narrated_attacker(entities, proposal, reply):
     return matches[0] if len(matches) == 1 else None
 
 
+MAX_ENEMIES = 8
+
+
+def encounter_roster(state, battle):
+    """Resolve stable roster IDs against the current world records."""
+    roster = battle.get("enemy_ids")
+    if not isinstance(roster, list):
+        roster = [battle.get("target_id")]
+    local = {entity["id"]: entity for entity in records(state)
+             if entity.get("kind") in ("npc", "creature")}
+    return [local[ident] for ident in dict.fromkeys(
+        ident for ident in roster[:MAX_ENEMIES] if isinstance(ident, str)) if ident in local]
+
+
+def combatant_available(entity, location):
+    return (key(entity.get("location")) == key(location) and is_present(entity)
+            and type(entity.get("hp")) is int and entity["hp"] > 0)
+
+
 def combat_context(state):
     combat = state.get("combat")
-    if not isinstance(combat, dict) or not isinstance(combat.get("target_id"), str):
+    scene = state.get("scene")
+    if not isinstance(combat, dict) or not isinstance(scene, dict) or not state.get("hp"):
         return None
-    target = next((entity for entity in records(state) if entity["id"] == combat["target_id"]), None)
-    if not target or not is_present(target) or type(target.get("hp")) is not int or not target["hp"] or not state.get("hp"):
+    location = scene.get("location")
+    if not location or combat.get("location") != location:
         return None
-    scene = state.get("scene") or {}
-    if not isinstance(scene, dict) or combat.get("location") != scene.get("location"):
+    live = [enemy["id"] for enemy in encounter_roster(state, combat) if combatant_available(enemy, location)]
+    if not live:
         return None
-    return combat
+    target_id = combat.get("target_id")
+    return combat if target_id in live else {**combat, "target_id": live[0]}
+
+
+def combat_status(state, battle):
+    location = battle["location"]
+    return [{"id": row["id"], "name": row["name"],
+             "status": ("active" if combatant_available(row, location) else
+                        life_state(row) if life_state(row) != "alive" else "left"),
+             "hp": row.get("hp"), "max_hp": row.get("max_hp")}
+            for row in encounter_roster(state, battle)]
+
+
+def start_encounter(state, enemies, roller, log):
+    hero = roller(1, 20) + hero_stat(state, "dex") + check_bonus(state, "dex")
+    initiative = [(None, hero, state.get("name") or "Герой")]
+    for entity in enemies:
+        bonus = max(0, profile(entity)["attack"] - 3) + check_bonus(state, "dex", entity["id"])
+        initiative.append((entity["id"], roller(1, 20) + bonus, entity["name"]))
+    initiative.sort(key=lambda actor: actor[1], reverse=True)
+    scores = ", ".join(f"{name} {score}" for ident, score, name in initiative)
+    log.append(f"Инициатива: {scores}. Первым действует «{initiative[0][2]}».")
+    return {"target_id": enemies[0]["id"], "location": state["scene"]["location"], "round": 0,
+            "enemy_ids": [enemy["id"] for enemy in enemies],
+            "initiative": [actor[0] for actor in initiative], "enemy_cooldowns": {}}
+
+
+def hostile(entity):
+    return bool(entity.get("encounter_position") or re.match(
+        r"^(?:hostile|враждеб|напада|атакует)", key(entity.get("status"))
+    ))
+
+
+def npc_turn(state, actor, enemy, guarding, enemy_guard, round_number, npc_cooldowns, roller):
+    control = active_control(state, actor["id"])
+    if control & {"sleep", "paralysis", "stun"}:
+        return f"«{actor['name']}» не может действовать из-за активного эффекта."
+    if enemy_guard:
+        return f"«{actor['name']}» защищается и получает +2 к КБ."
+    move = next((ability for ability in enemy["abilities"]
+                 if cooldown_ready(npc_cooldowns, ability["name"], round_number)
+                 and (not ability["cost"] or mana_for(actor, enemy["mana_pool"]) >= ability["cost"])
+                 and ("silence" not in control or ability["element"] == "physical")), None)
+    if move and (enemy["style"] in ("caster", "aggressive") or round_number % 2 == 0):
+        spend_move(actor, move, npc_cooldowns, round_number, enemy["mana_pool"])
+    else:
+        move = {"name": f"Атака: {actor['name']}", "dice": enemy["dice"], "element": "physical"}
+    stat = "int" if move["element"] != "physical" else "str"
+    return strike(actor, state, move, enemy["attack"] + check_bonus(state, stat, actor["id"]),
+                  hero_defense(state) + (2 if guarding else 0), {}, roller)
+
+
+def award_victory(state, target):
+    if target["hp"] == 0 and not target.get("combat_xp_paid"):
+        threat = target.get("threat")
+        xp = VICTORY_XP.get(threat if isinstance(threat, str) else "", VICTORY_XP["normal"])
+        state["xp"] = bounded_int(state.get("xp"), 0, 2_000_000_000, 0) + xp
+        target["combat_xp_paid"] = True
 
 
 def hero_ability(state, name):
@@ -319,6 +396,13 @@ def combat_turn(original, command, argument, roller=None):
     if hero_incapacitated(state): raise ValueError("Герой не может действовать из-за активного эффекта.")
     combat = combat_context(state)
     target_arg = argument
+    extra_targets = []
+    if command == "/attack" and "|" in argument:
+        target_arg, *extra_targets = [part.strip() for part in argument.split("|")]
+        if len(extra_targets) >= MAX_ENEMIES or not all([target_arg, *extra_targets]):
+            raise ValueError(f"Укажите от 1 до {MAX_ENEMIES} целей, разделённых |.")
+        if combat:
+            raise ValueError("В активном бою указывайте одну цель из списка.")
     if command == "/cast":
         ability_name, separator, target_arg = argument.partition("|")
         ability_name, target_arg = ability_name.strip(), target_arg.strip() if separator else ""
@@ -327,10 +411,10 @@ def combat_turn(original, command, argument, roller=None):
     if command == "/retreat":
         if not combat:
             raise ValueError("Сейчас нет активного боя.")
-        target = find_combatant(state, combat["target_id"])
         die = roller(1, 20)
         modifier = hero_stat(state, "dex") + check_bonus(state,"dex")
-        difficulty = profile(target)["defense"]
+        difficulty = max(profile(enemy)["defense"] for enemy in encounter_roster(state, combat)
+                         if combatant_available(enemy, combat["location"]))
         if die + modifier >= difficulty:
             state["combat"] = None
             state["combat_rounds"] = bounded_int(state.get("combat_rounds"),0,2_000_000_000,0)+1
@@ -348,23 +432,41 @@ def combat_turn(original, command, argument, roller=None):
     if not target_arg:
         raise ValueError("Укажите цель, например /attack имя.")
     target = find_combatant(state, target_arg)
-    if combat and target["id"] != combat["target_id"]:
-        raise ValueError("Сначала завершите текущий бой или попробуйте отступить.")
     combat_ready(target, "normal")
-    if not is_present(target) or not bounded_int(target.get("hp"), 1, 2_000_000_000, 0):
-        raise ValueError("Этот противник недоступен для боя.")
-    if not bounded_int(target.get("max_hp"), target["hp"], 2_000_000_000, 0):
-        raise ValueError("У противника повреждена запись здоровья.")
-    enemy = target["combat_profile"] = profile(target)
     location = state["scene"]["location"]
+    if not combatant_available(target, location):
+        raise ValueError("Этот противник недоступен для боя.")
     log = [retreat] if retreat else []
-    if not combat:
-        hero_init = roller(1, 20) + hero_stat(state, "dex") + check_bonus(state,"dex")
-        enemy_init = roller(1, 20) + max(0, enemy["attack"] - 3) + check_bonus(state,"dex",target["id"])
-        combat = {"target_id": target["id"], "location": location, "round": 0,
-                  "hero_first": hero_init >= enemy_init, "npc_cooldowns": {}}
-        first = (state.get("name") or "Герой") if combat["hero_first"] else target["name"]
-        log.append(f"Инициатива: герой {hero_init}, {target['name']} {enemy_init}. Первым действует «{first}».")
+    if combat:
+        enemies = encounter_roster(state, combat)
+        if target["id"] not in {entity["id"] for entity in enemies}:
+            raise ValueError("Выберите участника текущего боя или попробуйте отступить.")
+        if "enemy_ids" not in combat:
+            # Active Alpha 4 saves already have a fixed initiative and cooldowns.
+            ident = target["id"]
+            combat.update(enemy_ids=[ident], initiative=[None, ident] if combat.get("hero_first") else [ident, None],
+                          enemy_cooldowns={ident: combat.get("npc_cooldowns") or {}})
+    else:
+        selected = [find_combatant(state, reference) for reference in extra_targets]
+        if not extra_targets and hostile(target):
+            selected = [entity for entity in records(state) if entity["id"] != target["id"]
+                        and entity.get("kind") in ("npc", "creature") and hostile(entity)
+                        and key(entity.get("location")) == key(location) and is_present(entity)][:MAX_ENEMIES - 1]
+        enemies = list({entity["id"]: entity for entity in [target, *selected]}.values())
+        for entity in enemies:
+            combat_ready(entity, "normal")
+            if extra_targets and not combatant_available(entity, location):
+                raise ValueError(f"«{entity['name']}» недоступен для боя.")
+        enemies = [entity for entity in enemies if combatant_available(entity, location)]
+        combat = start_encounter(state, enemies, roller, log)
+    combat["target_id"] = target["id"]
+    active_enemies = {entity["id"]: entity for entity in enemies if combatant_available(entity, location)}
+    if any(not bounded_int(entity.get("max_hp"), entity["hp"], 2_000_000_000, 0)
+           for entity in active_enemies.values()):
+        raise ValueError("У противника повреждена запись здоровья.")
+    profiles = {ident: profile(entity) for ident, entity in active_enemies.items()}
+    for ident, entity in active_enemies.items():
+        entity["combat_profile"] = profiles[ident]
     round_number = bounded_int(combat.get("round"), 0, 1_000_000, 0) + 1
     combat["round"] = round_number
     cooldowns = state.get("ability_cooldowns")
@@ -394,58 +496,52 @@ def combat_turn(original, command, argument, roller=None):
             if move.get("ammo"):
                 require_ammo(state, move["ammo"])
     log.append(f"Раунд {round_number}.")
-    npc_cooldowns = combat.get("npc_cooldowns")
-    if not isinstance(npc_cooldowns, dict):
-        npc_cooldowns = combat["npc_cooldowns"] = {}
-    enemy_guard = enemy["style"] == "defensive" and 3 * target["hp"] <= target["max_hp"] and round_number % 2 == 0
-    for hero_turn in (combat["hero_first"], not combat["hero_first"]):
-        if state["hp"] <= 0 or target["hp"] <= 0:
+    cooldowns_by_enemy = combat.get("enemy_cooldowns")
+    if not isinstance(cooldowns_by_enemy, dict):
+        cooldowns_by_enemy = combat["enemy_cooldowns"] = {}
+    guards = {ident for ident, entity in active_enemies.items()
+              if profiles[ident]["style"] == "defensive" and 3 * entity["hp"] <= entity["max_hp"]
+              and round_number % 2 == 0}
+    saved_order = combat.get("initiative")
+    saved_order = saved_order[:MAX_ENEMIES + 1] if isinstance(saved_order, list) else []
+    actors = [ident for ident in saved_order if ident is None or isinstance(ident, str)]
+    order = dict.fromkeys([*actors, None, *active_enemies])
+    for ident in order:
+        if state["hp"] <= 0:
             break
-        if hero_turn:
-            if not guarding:
-                if prepared is not None:
-                    state.update({field: prepared[field] for field in ("abilities", "mana", "max_mana") if field in prepared})
-                    state["ability_cooldowns"] = ready_cooldowns
-                if move.get("ammo"):
-                    log.append(consume_ammo(state, move["ammo"]))
-                stat = state.get("casting_stat", "int") if command == "/cast" else move.get("stat", "str")
-                log.append(strike(state, target, move, 2 + hero_stat(state, stat) + check_bonus(state,stat),
-                                  enemy["defense"] + (2 if enemy_guard else 0), enemy["resistances"], roller))
+        if ident is None:
+            if guarding:
+                continue
+            if prepared is not None:
+                state.update({field: prepared[field] for field in ("abilities", "mana", "max_mana") if field in prepared})
+                state["ability_cooldowns"] = ready_cooldowns
+            if move.get("ammo"):
+                log.append(consume_ammo(state, move["ammo"]))
+            stat = state.get("casting_stat", "int") if command == "/cast" else move.get("stat", "str")
+            enemy = profiles[target["id"]]
+            log.append(strike(state, target, move, 2 + hero_stat(state, stat) + check_bonus(state, stat),
+                              enemy["defense"] + (2 if target["id"] in guards else 0),
+                              enemy["resistances"], roller))
+            award_victory(state, target)
             continue
-        if active_control(state, target["id"]) & {"sleep", "paralysis", "stun"}:
-            log.append(f"«{target['name']}» не может действовать из-за активного эффекта.")
+        actor = active_enemies.get(ident)
+        if not actor or not combatant_available(actor, location):
             continue
-        if enemy_guard:
-            log.append(f"«{target['name']}» защищается и получает +2 к КБ.")
-            continue
-        npc_move = next((ability for ability in enemy["abilities"]
-                         if cooldown_ready(npc_cooldowns, ability["name"], round_number)
-                         and (not ability["cost"] or mana_for(target, enemy["mana_pool"]) >= ability["cost"])
-                         and ("silence" not in active_control(state, target["id"]) or ability["element"] == "physical")), None)
-        if npc_move and (enemy["style"] in ("caster", "aggressive") or round_number % 2 == 0):
-            spend_move(target, npc_move, npc_cooldowns, round_number, enemy["mana_pool"])
-        else:
-            npc_move = {"name": f"Атака: {target['name']}", "dice": enemy["dice"], "element": "physical"}
-        log.append(strike(target, state, npc_move, enemy["attack"] + check_bonus(state,"int" if npc_move["element"] != "physical" else "str",target["id"]),
-                          hero_defense(state) + (2 if guarding else 0), {}, roller))
-    advance_action(state,6)
-    if state["hp"] <= 0 or target["hp"] <= 0:
-        state["combat"] = None
-        log.append("Раунд завершён." if any(
-            entity["id"] != target["id"] and entity.get("kind") == "creature"
-            and key(entity.get("location")) == key(location) and is_present(entity)
-            and type(entity.get("hp")) is int for entity in records(state)
-        ) else "Бой завершён.")
-        if target["hp"] == 0 and not target.get("combat_xp_paid"):
-            threat = target.get("threat")
-            xp = VICTORY_XP.get(threat if isinstance(threat, str) else "", VICTORY_XP["normal"])
-            state["xp"] = bounded_int(state.get("xp"), 0, 2_000_000_000, 0) + xp
-            target["combat_xp_paid"] = True
-    else:
-        state["combat"] = combat
+        npc_cooldowns = cooldowns_by_enemy.get(ident)
+        if not isinstance(npc_cooldowns, dict):
+            npc_cooldowns = cooldowns_by_enemy[ident] = {}
+        log.append(npc_turn(state, actor, profiles[ident], guarding, ident in guards,
+                            round_number, npc_cooldowns, roller))
+    advance_action(state, 6)
+    state["combat"] = combat
+    state["combat"] = combat_context(state)
+    if not state["combat"]:
+        log.append("Бой завершён.")
+    elif target["hp"] == 0:
+        log.append("Раунд завершён. В бою остаются другие противники.")
     return state, "\n".join(log)
 
 
 COMBAT_PROMPT = """
-У существ и NPC при вступлении в бой указывай threat и combat_profile:{style,resistances,abilities}. style: balanced/aggressive/defensive/caster. resistances: ключи physical/fire/cold/lightning/poison/arcane/radiant/shadow со значением resistant/immune/vulnerable. abilities: [{name,dice,element,cost,cooldown,hits,automatic}]. cost в мане, cooldown в раундах. Эти параметры проверяет сервер: сильный суммарный урон требует затрат маны и перезарядки, учитывается уровень героя или угроза существа. ability_cooldowns — оставшиеся боевые раунды, 0 означает готовность. Не объявляй применение недоступной способности. Для уже изученной способности героя можно передать такой же объект в abilities[].mechanics. При обычной атаке NPC объявляй имя атакующего и одну формулу, DC атаки по герою определит сервер. Результаты combat и rule_effect считай готовыми фактами.
+У существ и NPC при вступлении в бой указывай threat и combat_profile:{style,resistances,abilities}. style: balanced/aggressive/defensive/caster. resistances: ключи physical/fire/cold/lightning/poison/arcane/radiant/shadow со значением resistant/immune/vulnerable. abilities: [{name,dice,element,cost,cooldown,hits,automatic}]. cost в мане, cooldown в раундах. Эти параметры проверяет сервер: сильный суммарный урон требует затрат маны и перезарядки, учитывается уровень героя или угроза существа. ability_cooldowns — оставшиеся боевые раунды, 0 означает готовность. Не объявляй применение недоступной способности. Для уже изученной способности героя можно передать такой же объект в abilities[].mechanics. При обычной атаке NPC объявляй имя атакующего и одну формулу, DC атаки по герою определит сервер. Результаты combat и rule_effect считай готовыми фактами. В combat.enemies перечислены участники текущего боя. Учитывай состояние каждого по его ID. После победы над одной целью не объявляй завершение, пока в списке есть active. Для подтверждённого бегства запиши status «сбежал» и дословную фразу о событии в world_entities. Сохрани HP беглеца.
 """

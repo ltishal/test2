@@ -403,6 +403,50 @@ class InlineIntegrationTest(unittest.TestCase):
                 _, shop = self.m._engine_command(bought, '/shop', None)
                 self.assertIn('в наличии: 1', shop)
 
+    def test_alpha5_group_turn_commits_once_and_switches_after_reload(self):
+        from unittest.mock import patch
+        if not hasattr(self.m.app, 'test_client'):
+            self.skipTest('Flask is required to test the HTTP interface')
+        state = {**self.m.DEFAULT_STATE, 'name': 'Кочка', 'race': 'дворф', 'class': 'следопыт',
+                 'hp': 40, 'max_hp': 40, 'scene': {'location': 'Тропа'},
+                 'weapon_in_hand': 'длинный лук', 'stats': {'dex': 16},
+                 'inventory': [{'id': 'arrows', 'name': 'стрелы', 'quantity': 20}],
+                 'world_entities': [
+                     {'id': ident, 'name': ident, 'kind': 'creature', 'location': 'Тропа',
+                      'hp': hp, 'max_hp': 8, 'threat': 'minor', 'status': 'враждебен'}
+                     for ident, hp in [('cart', 1), ('branch', 8), ('forest', 8)]
+                 ]}
+        party_id = uuid4().hex
+        with self.m.app.test_client() as client, patch.multiple(
+            self.m, _check_presence=lambda *a, **kw: {'admitted': True},
+            _schedule_summary=lambda *a, **kw: None,
+        ), patch.object(self.m, '_start_stream', side_effect=AssertionError('Model should not roll initiative')):
+            token = 'G' * 43
+            client.set_cookie(self.m.OWNER_COOKIE, token)
+            self.m.PARTIES.create(self.m._owner(token), party_id, state, [])
+
+            def commit(revision, target, numbers):
+                payload = {'party_id': party_id, 'request_id': uuid4().hex, 'revision': revision,
+                           'action': {'content': '/attack ' + target}}
+                with patch('engine.combat.randint', side_effect=numbers):
+                    chat = client.post('/api/chat', json=payload)
+                    self.assertEqual(chat.status_code, 200, chat.get_data(as_text=True))
+                    self.assertIn(self.m.TURN_COMPLETE, chat.get_data(as_text=True))
+                committed = client.post('/api/state', json=payload)
+                self.assertEqual(committed.status_code, 200, committed.get_data(as_text=True))
+                self.assertEqual(committed.json, client.post('/api/state', json=payload).json)
+                return committed.json
+
+            first = commit(0, 'cart', [20, 10, 9, 8, 11, 3, 1, 1])
+            reloaded = client.get('/api/parties/' + party_id).json
+            self.assertEqual(first['state'], reloaded['state'])
+            initiative = reloaded['state']['combat']['initiative']
+            second = commit(1, 'forest', [11, 2, 1, 1])['state']
+            self.assertEqual(second['combat']['initiative'], initiative)
+            self.assertEqual((second['combat']['round'], second['inventory'][0]['quantity']), (2, 18))
+            self.assertEqual([npc['hp'] for npc in second['world_entities']], [0, 8, 6])
+            self.assertEqual(second['xp'], 25)
+
     def test_save_name_preserves_cyrillic_and_never_includes_path_separators(self):
         self.assertEqual(self.m._safe_name('Тест Alpha 2.1 — Лея'), 'Тест Alpha 2.1 — Лея')
         self.assertEqual(self.m._safe_name('../..'), '')

@@ -95,7 +95,7 @@ STOCK_PREFIX = (
 )
 DISPLAYED_STOCK = (
     r'(?:(?:выставил[аи]?|выложил[аи]?)\s+на прилавок|'
-    r'(?:на прилавке|у прилавка(?:\s+(?-i:[А-ЯЁ][а-яё-]+))?)\s+лежат)'
+    r'(?:на прилавке|у прилавка(?:\s+(?-i:[А-ЯЁ][а-яё-]+))?|перед тобой)\s+лежат)'
 )
 STOCK_COUNT = rf'(?:{COUNT}|оба|обе)'
 EXPLICIT_STOCK = re.compile(
@@ -110,7 +110,7 @@ DISPLAYED_ITEM = re.compile(
     r'(?=\s+и называет цену|[,.;!?])', re.I
 )
 UNIT_PRICE = re.compile(
-    rf'(?:называет цену|цена)\s*[:—–-]\s*{COUNT}\s+'
+    rf'(?:называет цену|цена|табличка гласит)\s*[:—–-]\s*{COUNT}\s+'
     r'(?:золот\w*|серебрян\w*|медн\w*|зм|см|мм)\s+за кажд\w*\b', re.I
 )
 ADJACENT_STOCK = re.compile(
@@ -166,7 +166,7 @@ def offers_from_story(reply, action=""):
         if not unit_price:
             continue
         between = tail[:unit_price.start()]
-        if len(re.findall(r'[.!?]', between)) > 1 or EXPLICIT_STOCK.search(between):
+        if len(re.findall(r'[.!?]', between)) > 1 or DISPLAYED_ITEM.search(between) or EXPLICIT_STOCK.search(between):
             continue
         stocked.append((match[1], clean[match.start():match.end()+unit_price.end()]))
     for name, evidence in stocked:

@@ -27,6 +27,16 @@ class Alpha412Test(unittest.TestCase):
         offer, = current_offers(state)
         self.assertEqual((offer['stock'], offer['price'], offer['offer_id']), (1, 3, first_id))
 
+    def test_price_only_sign_after_named_display(self):
+        state = {'scene': {'location': 'Лавка'}}
+        reply = ('Дождь стучит по навесу прилавка Орена. Перед тобой лежат два дорожных пайка; '
+                 'табличка гласит: **3 серебряных за каждый**. Покупки не было.')
+        state['shop_offers'] = merge_offers(state, [], reply)
+        offer, = current_offers(state)
+        self.assertEqual((offer['stock'], offer['price']), (2, 3))
+        unrelated = 'Табличка гласит: 3 серебряных за каждый.'
+        self.assertEqual(merge_offers({'scene': state['scene']}, [], unrelated), [])
+
     def test_requesting_price_does_not_confirm_it_without_a_quote(self):
         state = {'scene': {'location': 'Лавка'}}
         self.assertEqual(merge_offers(state, [], 'Орен просит подождать.',

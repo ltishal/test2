@@ -41,6 +41,9 @@ def life_state(entity):
     if status in DOWN_STATES or entity.get('hp')==0: return 'unconscious' if status in ('unconscious','без сознания') else 'defeated'
     return 'alive'
 
+RETURN_TO_SCENE = re.compile(
+    r'(?<!не )\b(?:возвраща(?:ется|ются)|вернул(?:ся|ась|ись)|вновь появил(?:ся|ась|ись))\b', re.I
+)
 ESCAPED_STATUS = re.compile(
     r'^(?:(?:fled|сбежал[аи]?|убежал[аи]?)(?:[\s.,:;!?]|$)|'
     r'(?:скрыл(?:ся|ась|ись)|уш[её]л|ушла)(?:[.,:;!?]|$|\s+'
@@ -157,7 +160,11 @@ def merge_entities(state, proposals, reply):
         # Death from the rules engine cannot be silently undone by narration.
         for field, limit in TEXT_FIELDS.items():
             value = text(patch.get(field),limit)
-            if value and not (field=='status' and life_state(entity)!='alive'):
+            if field == 'status' and (life_state(entity) != 'alive' or (
+                    ESCAPED_STATUS.search(key(entity.get('status'))) and is_present({'status': value})
+                    and not RETURN_TO_SCENE.search(evidence))):
+                continue
+            if value:
                 entity[field] = value
         if entity.get('kind') == 'item' and not entity.get('mechanics'):
             from engine.equipment import equipment_spec

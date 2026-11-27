@@ -2370,7 +2370,7 @@ function doHelp() {
     '<code>/sheet</code> — полный лист<br><code>/skills</code> — умения и навыки<br>' +
     '<code>/notes</code> — заметки, письма, документы<br>' +
     '<code>/world</code> — энциклопедия открытого мира<br><code>/effects</code> — активные эффекты<br>' +
-    '<code>/attack цель</code> — атака, <code>/cast умение | цель</code> — способность, <code>/guard</code> — защита, <code>/retreat</code> — отступление<br>' +
+    '<code>/attack цель</code> — атака, <code>/attack цель | другая цель</code> — начать бой с несколькими противниками, <code>/cast умение | цель</code> — способность, <code>/guard</code> — защита, <code>/retreat</code> — отступление<br>' +
     '<code>/design</code> — проекты партии, <code>/design имя</code> — правила проекта, <code>/learn имя</code> — изучить способность<br>' +
     '<code>/equip предмет</code> — экипировать, <code>/wallet</code> — кошелёк, <code>/shop</code> — цены, <code>/buy товар | количество</code> — покупка, <code>/exchange gold 1 silver</code> — размен<br>' +
     '<code>/wait</code> — время и события. <code>/wait next</code> — до ближайшего события<br>' +
@@ -2511,18 +2511,39 @@ if (quickCustomRoll) {
   };
 }
 
-document.getElementById('quick-attack').onclick = async () => {
-  if (busy || draftTurn) return;
-  if (state?.combat?.target_id) return handleCommand('/attack', '');
-  const local = state?.scene?.location;
-  const targets = (state?.world_entities || []).filter(entity => local && entity.location === local
-    && ['npc', 'creature'].includes(entity.kind) && entity.hp !== 0);
+function fightTargetStatus(entity, location) {
+  const states = {dead: 'Мёртв', defeated: 'Побеждён', unconscious: 'Без сознания', destroyed: 'Уничтожен'};
+  if (Object.hasOwn(states, entity.life_state)) return states[entity.life_state];
+  if (entity.hp === 0) return 'Побеждён';
+  if (String(entity.location || '').toLocaleLowerCase('ru') !== location.toLocaleLowerCase('ru')) return 'Вне сцены';
+  const status = String(entity.status || '').toLowerCase();
+  if (/^(?:fled|сбежал|убежал|скрыл(?:ся|ась|ись)(?:$| (?:в лес|в чащ|между |среди ))|уш[её]л(?:$| (?:в лес|в чащ|из боя)))/i.test(status)) {
+    return 'Сбежал';
+  }
+  return '';
+}
+
+document.getElementById('quick-attack').onclick = () => {
+  if (busy || draftTurn || !gameAccess) return;
+  const battle = state?.combat;
+  const location = state?.scene?.location || '';
+  const entities = state?.world_entities || [];
+  const roster = Array.isArray(battle?.enemy_ids) ? battle.enemy_ids : battle?.target_id ? [battle.target_id] : [];
+  const targets = roster.length
+    ? roster.map(id => entities.find(entity => entity.id === id)).filter(Boolean)
+    : entities.filter(entity => location && entity.location === location
+        && ['npc', 'creature'].includes(entity.kind) && !fightTargetStatus(entity, location));
   if (!targets.length) return sendMessage('Я атакую ближайшего противника!');
   modalContent.innerHTML = '<h3>Цель атаки</h3>'
-    + targets.map((entity, index) => '<button class="btn" data-target="'+index+'">'+esc(entity.name)+'</button>').join(' ')
+    + targets.map((entity, index) => {
+      const status = fightTargetStatus(entity, location);
+      const hp = Number.isInteger(entity.hp) ? ' · ' + esc(entity.hp) + '/' + esc(entity.max_hp) + ' HP' : '';
+      return '<div><button class="btn" data-target="' + index + '"' + (status ? ' disabled' : '') + '>'
+        + esc(entity.name) + hp + '</button>' + (status ? ' ' + esc(status) : '') + '</div>';
+    }).join('')
     + '<button class="btn" id="target-cancel">Закрыть</button>';
   modalEl.classList.add('open');
-  modalContent.querySelectorAll('[data-target]').forEach(button => {
+  modalContent.querySelectorAll('[data-target]:enabled').forEach(button => {
     button.onclick = () => {
       modalEl.classList.remove('open');
       handleCommand('/attack', targets[Number(button.dataset.target)].id);

@@ -49,7 +49,7 @@ from engine.world import (WORLD_PROMPT, world_context, merge_entities, npc_damag
 
 from engine.effects import (EFFECT_PROMPT, PASSIVE_OBSERVATION, resolve_effects, effect_context, check_bonus,
                             complete_hero_damage, control_restriction, hero_incapacitated, STATS, descriptive_damage)
-from engine.combat import (ARMOR, COMBAT_PROMPT, WEAPONS, combat_context, combat_turn, hero_defense, narrated_attacker,
+from engine.combat import (ARMOR, COMBAT_PROMPT, WEAPONS, combat_context, combat_status, combat_turn, hero_defense, narrated_attacker,
                            profile, safe_ability, narrated_weapon, narrated_ranged_check, bind_ranged_weapon, adjust_damage, SHOT_EVENT)
 from engine.economy import (TRADE_PROMPT, COINS, apply_exchange, apply_purchase, current_offers,
                             confirmed_purchase, exchange_from_story, merge_offers, trade_key, wallet_text, settle_offer, PURCHASE_CANCELLED, item_key, same_item)
@@ -58,7 +58,7 @@ from party_store import PartyConflict, PartyMissing, PartyStore
 from token_usage import TokenUsage, state_turn_id
 
 BASE_DIR = Path(__file__).resolve().parent
-APP_REVISION = "2026-11-27.world-alpha4.1.3"
+APP_REVISION = "2026-11-27.world-alpha5"
 QWEN_SUMMARY_LIMIT = 480
 QWEN_STATE_LIMIT = 1100
 QWEN_STATE_SETUP_LIMIT = 2200
@@ -2490,7 +2490,8 @@ def api_chat():
     if type(rounds) is int and isinstance(cooldowns,dict):
         state_context['ability_cooldowns']={name:max(0,until-rounds-1) for name,until in cooldowns.items() if type(until) is int}
     if battle := combat_context(game_state):
-        state_context["combat"] = {field: battle[field] for field in ("target_id", "round", "hero_first") if field in battle}
+        state_context["combat"] = {"target_id": battle["target_id"], "round": battle.get("round", 0),
+                                   "enemies": combat_status(game_state, battle)}
     if market := current_offers(game_state):
         state_context["shop_offers"] = [{k: offer[k] for k in ("item", "currency", "price", "seller_id", "stock", "offer_id") if k in offer} for offer in market[:8]]
     if isinstance(game_state.get("hero_form"), dict):
