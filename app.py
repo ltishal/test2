@@ -58,7 +58,7 @@ from party_store import PartyConflict, PartyMissing, PartyStore
 from token_usage import TokenUsage, state_turn_id
 
 BASE_DIR = Path(__file__).resolve().parent
-APP_REVISION = "2026-11-27.world-alpha4.1.1"
+APP_REVISION = "2026-11-27.world-alpha4.1.2"
 QWEN_SUMMARY_LIMIT = 480
 QWEN_STATE_LIMIT = 1100
 QWEN_STATE_SETUP_LIMIT = 2200
@@ -1783,7 +1783,7 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
     purchase = new_state.pop("purchase", None)
     offers_at_scene = {**current, "scene": campaign_scene, "world_entities":entities}
     stored_offers = current_offers(offers_at_scene, include_sold_out=True)
-    current["shop_offers"] = merge_offers(offers_at_scene, price_proposals, latest)
+    current["shop_offers"] = merge_offers(offers_at_scene, price_proposals, latest, action=action)
     exchange = new_state.pop("exchange", None)
     if not new_character:
         structured_exchange = exchange is not None

@@ -130,7 +130,7 @@ def narrated_attacker(entities, proposal, reply):
     candidate = proposal.get("actor_id") if isinstance(proposal, dict) else None
     if isinstance(candidate, str):
         npc = next((entry for entry in entities if entry["id"] == candidate
-                    and entry.get("kind") in ("npc", "creature")), None)
+                    and entry.get("kind") in ("npc", "creature") and is_present(entry)), None)
         if npc and any(key(name) in reply.casefold() for name in entity_names(npc)):
             return npc
     announced = re.search(r"\bбросок\s+за\s+[«„\"*]*(\w+(?:-\w+)?)", reply, re.I)
@@ -139,7 +139,7 @@ def narrated_attacker(entities, proposal, reply):
     reference = key(announced[1])
     matches = []
     for npc in entities:
-        if npc.get("kind") not in ("npc", "creature"):
+        if npc.get("kind") not in ("npc", "creature") or not is_present(npc):
             continue
         for name in entity_names(npc):
             normalized = key(name)

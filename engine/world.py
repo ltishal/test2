@@ -41,10 +41,15 @@ def life_state(entity):
     if status in DOWN_STATES or entity.get('hp')==0: return 'unconscious' if status in ('unconscious','без сознания') else 'defeated'
     return 'alive'
 
+ESCAPED_STATUS = re.compile(
+    r'^(?:(?:fled|сбежал[аи]?|убежал[аи]?)(?:[\s.,:;!?]|$)|'
+    r'(?:скрыл(?:ся|ась|ись)|уш[её]л|ушла)(?:[.,:;!?]|$|\s+'
+    r'(?:в лес(?:у)?|в чащ[уе]|между (?:деревьями|стволами)|среди деревьев|из боя)\b))', re.I
+)
+
+
 def is_present(entity):
-    return life_state(entity) == 'alive' and key(entity.get('status')) not in {
-        'сбежал', 'сбежала', 'скрылся', 'скрылась', 'fled',
-    }
+    return life_state(entity) == 'alive' and not ESCAPED_STATUS.search(key(entity.get('status')))
 
 
 def sync_life(entity):
@@ -183,10 +188,13 @@ PERSON_NAME = r"[А-ЯЁ][а-яё-]{2,30}(?: [А-ЯЁ][а-яё-]{2,30})?"
 NPC_ROLES = {
     'торговец': 'торговец', 'купец': 'торговец', 'страж': 'страж',
     'стражник': 'страж', 'сторож': 'сторож', 'наниматель': 'наниматель',
-    'спутник': 'спутник', 'проводник': 'проводник', 'дворф': 'дворф',
+    'спутник': 'спутник', 'проводник': 'проводник', 'дворф': 'дворф', 'возница': 'возница',
 }
 ROLE_WORD = r"(?i:" + '|'.join(NPC_ROLES) + r")"
 ROLE_NAME = re.compile(rf"\b({ROLE_WORD})(?:-{ROLE_WORD})?\s+({PERSON_NAME})\b")
+PERSON_ACTION = re.compile(
+    rf"\b({PERSON_NAME})\s+(?i:удерживает поводья|держит поводья|правит повозкой)\b"
+)
 ROLE_NAME_REVERSED = re.compile(
     rf"\b({PERSON_NAME})\s*(?:,\s*|[—–]\s*)(?:(?i:портовый)\s+)?"
     rf"(?:(?i:дворф)-)?({ROLE_WORD})\b"
@@ -226,6 +234,11 @@ def restore_scene_people(entities, scene, reply, previous_scene=None, hero_name=
     clean = re.sub(r'[*_`]', '', reply)
     found = [(m[1], m[2]) for m in ROLE_NAME.finditer(clean)]
     found.extend((m[2], m[1]) for m in ROLE_NAME_REVERSED.finditer(clean))
+    found.extend(('возница', m[1]) for m in PERSON_ACTION.finditer(clean)
+                 if len(m[1].split()) == 2 and not any(
+                     entry.get('kind') == 'npc'
+                     and any(key(alias) == key(m[1]) for alias in entity_names(entry))
+                     for entry in entities))
     for role, name in found:
         if key(name) == key(hero_name):
             continue
@@ -278,8 +291,9 @@ def restore_scene_people(entities, scene, reply, previous_scene=None, hero_name=
 
 
 GOBLIN_ESCAPE = re.compile(
-    r'\b(?:третий\s+)?гоблин(?:\s+у леса)?\s+'
-    r'(?:уш[её]л|убежал|скрылся|сбежал)\s+(?:в лес|в чащу|между деревьями)\b', re.I
+    r'\b(?:третий\s+)?гоблин(?:\s+у леса)?\s+(?:вздрагивает и\s+)?'
+    r'(?:уш[её]л|уходит|убежал|скрылся|скрывается|сбежал)\s+'
+    r'(?:в лес(?:у)?|в чащ[уе]|между (?:деревьями|стволами)|среди деревьев)\b', re.I
 )
 
 

@@ -89,12 +89,22 @@ EXPLICIT_QUOTE = re.compile(
 )
 
 
-STOCK_PREFIX = r'(?:в наличии|у него есть|у не[её] есть|остал(?:ось|ись|ась)|есть)'
-EXPLICIT_STOCK = re.compile(rf'\b{STOCK_PREFIX}\s+({COUNT})\b', re.I)
+STOCK_PREFIX = r'(?:в наличии|у него есть|у не[её] есть|остал(?:ся|ось|ись|ась)|есть)'
+DISPLAYED_STOCK = r'(?:выставил[аи]?|выложил[аи]?)\s+на прилавок'
+EXPLICIT_STOCK = re.compile(rf'\b(?:{STOCK_PREFIX}|{DISPLAYED_STOCK})\s+({COUNT})\b', re.I)
 STOCKED_QUOTE = re.compile(
     rf'\b{STOCK_PREFIX}\s+({COUNT})\s+([а-яё]+(?:\s+[а-яё]+){{0,3}}?)\s+по\s+'
     rf'({COUNT})\s+(золот\w*|серебрян\w*|медн\w*|зм|см|мм)\b', re.I
 )
+
+DISPLAYED_PRICE = re.compile(
+    rf'\b{DISPLAYED_STOCK}\s+({COUNT})\s+([а-яё]+(?:\s+[а-яё]+){{0,3}}?)'
+    rf'\s+и называет цену:\s*({COUNT})\s+(золот\w*|серебрян\w*|медн\w*|зм|см|мм)'
+    r'\s+за кажд\w*\b', re.I
+)
+TRADE_CONTEXT = re.compile(r'торгов|продав|лавк|прилав|таблич|прайс|дощечк\w* с (?:меловой )?надписью', re.I)
+ASK_PRICE = re.compile(r'\b(?:спрашива\w*|уточня\w*|узна\w*|покажи\w*)\b[^.?!]{0,80}\b(?:цен\w*|стоит)\b', re.I)
+
 
 
 def stated_stock(value):
@@ -105,9 +115,10 @@ def stated_stock(value):
     return int(count) if count.isdigit() else WORDS[count]
 
 
-def offers_from_story(reply):
+def offers_from_story(reply, action=""):
     """Recover explicitly priced items from a sign or a merchant's quote."""
-    if not re.search(r"торгов|продав|лавк|прилав|таблич|прайс", reply, re.I):
+    context = TRADE_CONTEXT.search(reply) or ASK_PRICE.search(action)
+    if not context:
         return []
     quotes = []
     clean = proof_text(reply)
@@ -121,20 +132,22 @@ def offers_from_story(reply):
         tail = clean[match.end():match.end()+125]
         stock_match = re.match(
             r'^[»" ,;]*(?:[.!?]\s*)?(?:(?:торговец|продавец|он|она)\s+подтверждает,?\s+что\s+)?'
-            rf'{STOCK_PREFIX}\s+([^.!?;»"]{{1,48}})', tail, re.I
+            r'(?:после продажи[^.!?;]{0,42}?\s+)?(?:у него\s+|у не[её]\s+)?'
+            rf'{STOCK_PREFIX}\s+{COUNT}\b', tail, re.I
         )
         stock = stated_stock(stock_match[0]) if stock_match else None
         evidence = clean[match.start():match.end() + (stock_match.end() if stock_match else 0)].strip(' «»":')
         currency, amount = price[0]
         quotes.append({"item": name, "currency": currency, "price": amount, "stock": stock or 1,
                        "stock_explicit": stock is not None, "evidence": evidence})
-    for match in STOCKED_QUOTE.finditer(clean):
-        price = coin_mentions(match[0])
-        if price:
-            currency, amount = price[0]
-            quotes.append({"item": match[2], "currency": currency, "price": amount,
-                           "stock": stated_stock(match[0]), "stock_explicit": True,
-                           "evidence": match[0]})
+    for pattern in (STOCKED_QUOTE, DISPLAYED_PRICE):
+        for match in pattern.finditer(clean):
+            price = coin_mentions(match[0])
+            if price:
+                currency, amount = price[0]
+                quotes.append({"item": match[2], "currency": currency, "price": amount,
+                               "stock": stated_stock(match[0]), "stock_explicit": True,
+                               "evidence": match[0]})
     return quotes[:6]
 
 
@@ -266,13 +279,13 @@ def current_offers(state, *, include_sold_out=False):
             and (not offer.get('seller_id') or (isinstance(offer.get('seller_id'),str) and offer['seller_id'] in local_sellers))][:20]
 
 
-def merge_offers(state, proposed, reply):
+def merge_offers(state, proposed, reply, *, action=""):
     offers = [offer for offer in state.get("shop_offers", []) if isinstance(offer, dict)] if isinstance(state.get("shop_offers"), list) else []
     scene = state.get("scene")
     location = scene.get("location") if isinstance(scene, dict) else ""
     if not trade_key(location):
         return offers
-    inferred = offers_from_story(reply)
+    inferred = offers_from_story(reply, action)
     proposals = proposed[:10] if isinstance(proposed, list) else []
     accepted = set()
     for quote in [*proposals, *inferred]:
