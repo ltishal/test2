@@ -59,6 +59,15 @@ class Alpha41Test(unittest.TestCase):
         restore_scene_people(entries, scene, reply)
         self.assertEqual([entry['id'] for entry in entries], ids)
 
+    def test_goblin_cards_are_restored_from_followup_sighting(self):
+        reply = ('Из-за камня видны те же трое целых гоблинов-разведчиков: один возится у повозки, '
+                 'второй сидит за поваленными ветвями, третий наблюдает с края леса. '
+                 'Новых противников ты не ищешь; ничего не изменилось. Стрелы целы.')
+        scene = {'location': 'Лесная тропа'}
+        entries = restore_scene_people([], scene, reply)
+        self.assertEqual({entry['encounter_position'] for entry in entries}, {'повозка', 'ветви', 'лес'})
+        self.assertEqual([entry['max_hp'] for entry in entries], [8, 8, 8])
+
     def test_named_creatures_and_legacy_health(self):
         scene = {'location': 'Амбар'}
         entries = restore_scene_people([], scene,

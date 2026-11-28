@@ -58,7 +58,7 @@ from party_store import PartyConflict, PartyMissing, PartyStore
 from token_usage import TokenUsage, state_turn_id
 
 BASE_DIR = Path(__file__).resolve().parent
-APP_REVISION = "2026-11-28.world-alpha5.1.6"
+APP_REVISION = "2026-11-28.world-alpha5.1.7"
 QWEN_SUMMARY_LIMIT = 480
 QWEN_STATE_LIMIT = 1100
 QWEN_STATE_SETUP_LIMIT = 2200
@@ -1154,9 +1154,10 @@ LETTER_HANDOFF = re.compile(r'\b(?:передаю|вручаю|отдаю)\b[^.!
 LETTER_RECEIVED = re.compile(
     r'\b(?:протягивает|вручает|переда[её]т)\s+(?:тебе\s+)?' + SEALED_LETTER.pattern, re.I
 )
+LETTER_NPC_TITLE = r'страж|стражник|торговец|купец|архивистка|архивист'
 LETTER_RECIPIENT = re.compile(
-    r'\b((?:(?i:страж|стражник|торговец|купец|архивистка|архивист)\s+)?'
-    r'[А-ЯЁ][а-яё-]{2,30}(?: [А-ЯЁ][а-яё-]{2,30})?)\s+'
+    rf'\b((?:(?i:{LETTER_NPC_TITLE})\s+)?'
+    rf'[А-ЯЁ][а-яё-]{{2,30}}(?: [А-ЯЁ][а-яё-]{{2,30}})?(?:\s+\((?i:{LETTER_NPC_TITLE})\))?)\s+'
     r'(?i:принимает|принял[аи]?|бер[её]т|взял[аи]?)\s+(?:у тебя\s+)?' + SEALED_LETTER.pattern
 )
 LETTER_DELIVERED = re.compile(
@@ -1173,10 +1174,13 @@ def letter_recipient(reference, candidates, *, dative=False):
     normalized = world_key(reference)
     roles = {role for role, pattern in LETTER_ROLES.items() if re.search(rf'\b(?:{pattern})\b', normalized)}
     title = '|'.join(LETTER_ROLES.values())
-    name_reference = re.sub(rf'^(?:{title})\s+', '', normalized)
+    def bare_name(value):
+        return re.sub(rf'^(?:{title})\s+|\s*\((?:{title})\)$', '', world_key(value))
+
+    name_reference = bare_name(reference)
 
     def matches_name(alias):
-        name = re.sub(rf'^(?:{title})\s+', '', world_key(alias))
+        name = bare_name(alias)
         if not name:
             return False
         if not dative:
@@ -1195,7 +1199,13 @@ def letter_recipient(reference, candidates, *, dative=False):
     if not by_name and any(re.search(rf'\b(?i:{LETTER_ROLES[role]})\s+[А-ЯЁ][а-яё-]+', reference)
                            for role in roles):
         return None
-    matches = [npc for npc in (by_name or candidates) if not roles or roles & entry_roles(npc)]
+    def matches_role(npc):
+        return not roles or bool(roles & entry_roles(npc)) or any(
+            re.search(rf'\((?:{LETTER_ROLES[role]})\)$', world_key(alias))
+            for alias in entity_names(npc) for role in roles
+        )
+
+    matches = [npc for npc in (by_name or candidates) if matches_role(npc)]
     return matches[0] if len(matches) == 1 else None
 
 
@@ -2077,12 +2087,17 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
     if isinstance(current.get("stats"), dict) and isinstance(new_state.get("stats"), dict):
         merged["stats"] = {**current["stats"], **new_state["stats"]}
     old_quests = current.get("quests")
+    old_quests = old_quests if isinstance(old_quests, list) else []
+    letter_rejected = bool(letter_log)
     quest_changes = new_state.get("quests")
-    merged["quests"] = _merge_quests(
-        old_quests if isinstance(old_quests, list) else [],
-        quest_changes if isinstance(quest_changes, list) else [],
-        latest,
-    )
+    if letter_rejected:
+        # Quest progress and rewards cannot depend on a transfer the server rejected.
+        merged["quests"] = old_quests
+        reward_outcomes = None
+    else:
+        merged["quests"] = _merge_quests(
+            old_quests, quest_changes if isinstance(quest_changes, list) else [], latest,
+        )
     # Preserve arrays when the model accidentally returns empty/missing arrays.
     for f in ("inventory", "notes", "conditions", "relationships", "faction_clocks",
               "dc_modifier_reasons", "proficiencies", "skills", "abilities"):
@@ -2138,6 +2153,9 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
     )
     xp += quest_awards.get("xp", 0)
     for event_id, awards in fresh_events:
+        processed.append(event_id)
+        if letter_rejected and event_id == last_event_id:
+            continue
         for amount, name in awards:
             if not name and event_id == last_event_id and controls_wallet:
                 continue
@@ -2160,7 +2178,6 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
                 if isinstance(quest.get("id"), str):
                     paid_ids.add(quest["id"])
             xp += amount
-        processed.append(event_id)
     for name, quest in newly_completed.items():
         reward = quest.get("rewards")
         if quest.get("reward_condition") or not isinstance(reward, dict):
@@ -2179,7 +2196,7 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
     # Server trades already updated current. A model balance may include the quest award.
     for currency, balance in wallet(current).items():
         award = quest_awards.get(currency, 0)
-        if controls_wallet or award:
+        if letter_rejected or controls_wallet or award:
             merged[currency] = balance + award
     merged["quest_xp_awards"] = sorted(paid)
     merged["quest_xp_paid_ids"] = sorted(paid_ids)

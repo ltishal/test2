@@ -94,6 +94,20 @@ class Alpha51Test(unittest.TestCase):
         self.assertEqual(state['silver'], 2)
         self.assertEqual([offer['stock'] for offer in current_offers(state)], [1, 2])
 
+    def test_named_merchant_can_answer_without_repeating_their_role(self):
+        action = ('Возвращаюсь во двор мастерской к торговцу Орену. Покупку пока не совершаю. '
+                  'Прошу вслух подтвердить ассортимент одной репликой.')
+        reply = ('Орен подтверждает: «Разводной ключ — один в наличии, 8 серебряных за штуку. '
+                 'Стопорных штифтов — три, по 2 серебряных за штуку». Покупки не было.')
+        revised = ('Орен повторяет: «Разводной ключ — 1 штука, 8 серебряных. '
+                   'Стопорных штифтов — 3 штуки, по 2 серебряных за штуку».')
+        for quote in (reply, revised):
+            with self.subTest(quote=quote):
+                offers = merge_offers(self.state, [], quote, action=action)
+                self.assertEqual([(offer['stock'], offer['price']) for offer in offers], [(1, 8), (3, 2)])
+        bulk = 'Орен подтверждает: «Стопорных штифтов — 3 штуки, 6 серебряных за весь набор».'
+        self.assertEqual(merge_offers(self.state, [], bulk, action=action), [])
+
     def test_market_replays_two_live_scenes(self):
         samples = (
             ('Торговец при воротах отвечает: «Дорожный паёк — 5 серебряных». Он сверяется с полкой и сообщает: осталось **две штуки**. Ты ничего не покупаешь.', 2, 5),

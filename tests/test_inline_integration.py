@@ -828,6 +828,51 @@ class InlineIntegrationTest(unittest.TestCase):
         unchanged = {**state, 'shop_offers': merge_offers(state, [unsupported], price)}
         self.assertEqual(current_offers(unchanged)[0]['stock'], 2)
 
+    def test_letter_roles_in_parentheses_do_not_hide_namesakes(self):
+        letter = {'id': 'seal', 'name': 'Запечатанное письмо', 'quantity': 1}
+        candidates = [
+            {'id': 'guard', 'name': 'Орен (страж)', 'kind': 'npc', 'location': 'Двор'},
+            {'id': 'merchant', 'name': 'Орен', 'kind': 'npc', 'role': 'торговец', 'location': 'Двор'},
+        ]
+        ambiguous = 'Передаю запечатанное письмо Орену.'
+        explicit = 'Передаю запечатанное письмо стражу Орену.'
+        merchant = 'Торговец Орен принимает запечатанное письмо.'
+        guard = 'Орен (страж) принимает запечатанное письмо.'
+        self.assertIsNone(self.m.narrated_letter_transfer([letter], ambiguous, merchant, candidates, 'Двор'))
+        self.assertIsNone(self.m.narrated_letter_transfer([letter], explicit, merchant, candidates, 'Двор'))
+        transfer = self.m.narrated_letter_transfer([letter], explicit, guard, candidates, 'Двор')
+        self.assertEqual(transfer['holder_id'], 'guard')
+
+    def test_rejected_letter_does_not_complete_quest_or_pay(self):
+        letter = {'id': 'seal', 'name': 'Запечатанное письмо', 'quantity': 1}
+        quest = {'id': 'delivery', 'name': 'Письмо для стража', 'status': 'active',
+                 'stages': [{'text': 'Вручить письмо стражу', 'done': False}],
+                 'rewards': {'xp': 50, 'silver': 6}}
+        state = {**self.m.DEFAULT_STATE, 'name': 'Дана', 'race': 'человек', 'class': 'следопыт',
+                 'scene': {'location': 'Двор'}, 'silver': 4, 'inventory': [letter], 'quests': [quest],
+                 'world_entities': [
+                     {'id': 'guard', 'name': 'Орен (страж)', 'kind': 'npc', 'location': 'Двор'},
+                     {'id': 'merchant', 'name': 'Орен', 'kind': 'npc', 'role': 'торговец', 'location': 'Двор'},
+                 ]}
+        wrong = 'Торговец Орен принимает запечатанное письмо.\n+50 XP — квест «Письмо для стража».'
+        history = [{'role': 'user', 'content': 'Передаю запечатанное письмо Орену.'},
+                   {'role': 'assistant', 'content': wrong}]
+        completed = {**quest, 'status': 'completed', 'stages': [{'text': 'Вручить письмо стражу', 'done': True}]}
+        rejected = self.m.extract_state(history, state, inline_delta={
+            'quests': [completed], 'silver': 10, 'resource_events': {'wallet': wrong.splitlines()[0]},
+        })
+        self.assertEqual(rejected['inventory'], [letter])
+        self.assertEqual(rejected['quests'][0]['status'], 'active')
+        self.assertEqual((rejected['xp'], rejected['silver']), (0, 4))
+        history += [{'role': 'user', 'content': 'Передаю запечатанное письмо стражу Орену.'},
+                    {'role': 'assistant', 'content': 'Орен (страж) принимает запечатанное письмо.'}]
+        delivered = self.m.extract_state(history, rejected, inline_delta={'quests': [completed]})
+        self.assertEqual(delivered['inventory'], [])
+        self.assertEqual(delivered['quests'][0]['status'], 'completed')
+        self.assertEqual((delivered['xp'], delivered['silver']), (50, 10))
+        self.assertEqual([f['holder_id'] for f in delivered['facts'] if f.get('holder')], ['guard'])
+        self.assertEqual(self.m.extract_state(history, delivered, inline_delta={}), delivered)
+
     def test_alpha511_letter_requires_same_npc_in_action_and_reply(self):
         letter = {'id': 'seal', 'name': 'Запечатанное письмо', 'quantity': 1}
         state = {**self.m.DEFAULT_STATE, 'name': 'Ива', 'race': 'человек', 'class': 'маг',

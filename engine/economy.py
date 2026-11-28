@@ -98,9 +98,9 @@ COUNTED_LIST_QUOTE = re.compile(
 )
 ITEM_STOCK_QUOTE = re.compile(
     rf'(?:^|[«"]|[.!?]\s+)([а-яё-]+(?:\s+[а-яё-]+){{0,4}}?)\s*[—–]\s*'
-    rf'({COUNT})(?:\s+в наличии)?\s*,\s*(?:по\s+)?'
+    rf'({COUNT})(?:\s+(?:в наличии|штук\w*|шт\.?))?\s*,\s*(?:(по)\s+)?'
     rf'{COUNT}\s+(?:золот\w*|серебрян\w*|медн\w*|зм|см|мм)\b'
-    r'\s+за\s+(?:штук\w*|кажд\w*)\b', re.I,
+    r'(\s+за\s+(?:штук\w*|кажд\w*)\b)?', re.I,
 )
 DISPLAYED_LIST = re.compile(rf'\bпоказыва(?:я|ет)\s+({COUNT}\b[^.!?;]{{4,130}})[.!?]', re.I)
 DISPLAYED_COUNT = re.compile(
@@ -178,6 +178,13 @@ def displayed_offer(item, text):
     return shown[0] if len(shown) == 1 else None
 
 
+def item_stock_quotes(evidence):
+    for match in ITEM_STOCK_QUOTE.finditer(evidence):
+        name, count, per_unit, unit_suffix = match.groups()
+        if per_unit or unit_suffix or count.casefold() in ('1', 'один', 'одна', 'одну', 'одной'):
+            yield name, count, match[0]
+
+
 def offer_stock(item, evidence):
     """Associate a count with its quoted item even when several are shown together."""
     clean = proof_text(evidence)
@@ -185,8 +192,8 @@ def offer_stock(item, evidence):
     counts = [match[2] for match in quotes if match[2]]
     counts.extend(match[1] for match in COUNTED_LIST_QUOTE.finditer(clean)
                   if same_item(match[2], item))
-    counts.extend(match[2] for match in ITEM_STOCK_QUOTE.finditer(clean)
-                  if same_item(match[1], item))
+    counts.extend(count for name, count, _ in item_stock_quotes(clean)
+                  if same_item(name, item))
     if len(set(counts)) == 1:
         count = counts[0]
         return int(count) if count.isdigit() else WORDS[count.casefold()]
@@ -199,7 +206,9 @@ def offer_stock(item, evidence):
 
 def offers_from_story(reply, action=""):
     """Recover explicitly priced items from a sign or a merchant's quote."""
-    context = TRADE_CONTEXT.search(reply) or ASK_PRICE.search(action)
+    asks_about_trade = TRADE_CONTEXT.search(action) and re.search(
+        r'\b(?:цен\w*|стоит|ассортимент\w*|наличи\w*|остат\w*)\b', action, re.I)
+    context = TRADE_CONTEXT.search(reply) or ASK_PRICE.search(action) or asks_about_trade
     if not context:
         return []
     quotes = []
@@ -236,7 +245,7 @@ def offers_from_story(reply, action=""):
         quotes.append({"item": name, "currency": currency, "price": amount, "stock": 1 if stock is None else stock,
                        "stock_explicit": stock is not None, "evidence": evidence})
     counted = [(match[1], match[2], match[0]) for match in COUNTED_LIST_QUOTE.finditer(clean)]
-    counted.extend((match[2], match[1], match[0]) for match in ITEM_STOCK_QUOTE.finditer(clean))
+    counted.extend((count, name, evidence) for name, count, evidence in item_stock_quotes(clean))
     for count, name, evidence in counted:
         currency, price = coin_mentions(evidence)[-1]
         stock = int(count) if count.isdigit() else WORDS[count.casefold()]
