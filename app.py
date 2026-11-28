@@ -51,14 +51,14 @@ from engine.effects import (EFFECT_PROMPT, PASSIVE_OBSERVATION, resolve_effects,
                             complete_hero_damage, control_restriction, hero_incapacitated, STATS, descriptive_damage)
 from engine.combat import (ARMOR, COMBAT_PROMPT, WEAPONS, combat_context, combat_status, combat_turn, hero_defense, narrated_attacker,
                            profile, safe_ability, narrated_weapon, narrated_ranged_check, bind_ranged_weapon, adjust_damage, SHOT_EVENT)
-from engine.economy import (TRADE_PROMPT, COINS, apply_exchange, apply_purchase, current_offers,
-                            confirmed_purchase, exchange_from_story, merge_offers, trade_key, wallet_text, settle_offer, PURCHASE_CANCELLED, item_key, same_item, grounded as trade_grounded)
+from engine.economy import (TRADE_PROMPT, COINS, apply_exchange, apply_purchase, current_offers, coin_mentions,
+                            confirmed_purchase, exchange_from_story, merge_offers, trade_key, wallet, wallet_text, settle_offer, PURCHASE_CANCELLED, item_key, same_item, grounded as trade_grounded)
 
 from party_store import PartyConflict, PartyMissing, PartyStore
 from token_usage import TokenUsage, state_turn_id
 
 BASE_DIR = Path(__file__).resolve().parent
-APP_REVISION = "2026-11-28.world-alpha5.1.3"
+APP_REVISION = "2026-11-28.world-alpha5.1.5"
 QWEN_SUMMARY_LIMIT = 480
 QWEN_STATE_LIMIT = 1100
 QWEN_STATE_SETUP_LIMIT = 2200
@@ -625,7 +625,7 @@ def narration_budget(action):
 STATE_EXTRACT_PROMPT = """
 Игровые часы. При создании верни world_minute — минута первого дня 0..1439. В обычном ходе верни elapsed: {minutes,evidence}, где minutes — только новые фактически прошедшие минуты, evidence — дословная фраза из новой реплики. Если явно указан час в конце действия, верни clock_end: {evidence} с точной фразой о текущем времени или завершённом прибытии. Не бери час из обещания, прошлого или расписания. Если roll_result.check.clock_spent указан, прежняя длительность уже учтена. Если время относится к отдельному предшествующему действию, например дороге до места проверки, верни elapsed.before_check: true. Верни elapsed.additional: true только для нового, явно дополнительного интервала после броска, с цитатой именно о дополнительных минутах. При wait_plan конец ожидания определён сервером.
 События. Для новых обещанных встреч, ответов, возвращений и уже отправленных важных посыльных верни schedule: [{id,title,location,in_minutes,evidence}]. Используй стабильный id, название с именем или ролью участника, и срок от конца текущего хода. Если участник отправился или взялся ответить, а срок не назван, верни check_in: true вместо in_minutes. Сервер назначит время проверки известий. evidence — цитата о принятом поручении или состоявшейся отправке. Не записывай неподтверждённые предложения как события. Для нового конкретного исхода события верни resolve_events: [{id,outcome,evidence}], при явной досрочной отмене или прибытии добавь early: true. Не создавай повторно то же поручение, если новость лишь задержалась.
-Награда квеста. stages — условия завершения; reward_condition — отдельное условие выплаты из исходного предложения, если оно есть. Сохраняй его и суммы rewards при принятии и позже. При завершении условного задания или новой подтверждённой информации о награде верни reward_outcomes: [{id,outcome,evidence}], outcome — met, unmet или pending. evidence — дословная фраза о том, что условие выполнено или не выполнено. Не меняй золото, серебро, медь и XP при расчёте условной награды: сервер начисляет согласованные суммы. Если точного подтверждения нет, используй pending. Условие выплаты не входит в stages и не определяет status. Если цель выполнена, отметь этапы и завершение даже при outcome: unmet или pending. Оставляй pending при неопределённости, unmet только при установленном несоблюдении условия.
+Награда квеста. Запиши согласованные монеты в rewards. Если в карточке уже есть часть награды, добавь недостающий номинал с суммой и полем reward_terms_evidence прямо в записи квеста. Это дословная фраза из новой реплики мастера, где названы награда за этот квест, сумма и валюта. Уже записанные суммы сохраняй. Сервер начисляет их при завершении обычного квеста, поэтому не включай эти суммы в изменения кошелька. stages — условия завершения; reward_condition — отдельное условие выплаты из исходного предложения, если оно есть. Сохраняй его и суммы rewards при принятии и позже. При завершении условного задания или новой подтверждённой информации о награде верни reward_outcomes: [{id,outcome,evidence}], outcome — met, unmet или pending. evidence — дословная фраза о том, что условие выполнено или не выполнено. Не меняй золото, серебро, медь и XP при расчёте условной награды: сервер начисляет согласованные суммы. Если точного подтверждения нет, используй pending. Условие выплаты не входит в stages и не определяет status. Если цель выполнена, отметь этапы и завершение даже при outcome: unmet или pending. Оставляй pending при неопределённости, unmet только при установленном несоблюдении условия.
 
 Сохраняй канон кампании. Для новой сцены или изменений верни scene: {location,time,participants,goal,situation}. Указывай устойчивое название локации. participants — только те, кто сейчас рядом. При смене локации обнови участников, цель и обстановку сцены. Возвращай только изменения. Для подтверждённых событий, показаний, версий и владения уликами верни обновления facts: [{id,subject,detail,source,holder,status}]. Устойчивый id привязан к одному факту или предмету, сохрани его при уточнении и передаче. status: confirmed, reported, suspected или resolved. Для значимого действия NPC, которое действительно произошло в новой сцене, верни npc_actions: [{id,actor,location,evidence}]. Дай одному действию устойчивый ID. evidence — дословная фраза, где рассказчик описал действие, а не слова о том, что кто-то якобы сделал. Записывай уходы, прибытия, принятые поручения и важные передачи. Показания и догадки пиши отдельно в facts. Не повторяй прежнее действие при пересказе. Для передачи физической улики обнови holder и inventory_remove в том же ходе. Для новой объявленной команды /roll верни pending_check: {kind,title,target,effect,ability}; kind — check, attack, save, damage, heal или initiative. effect только hero_damage для урона персонажу игрока или hero_heal для его лечения. Для урона NPC effect опусти. Формулу и DC сервер получает из реплики. Для ожидающей проверки верни cancel_check: {evidence}, если проверка явно отменена или прежнее действие заменено и новая реплика подтверждает, что проверка больше не нужна. Если объявлена новая проверка, верни её отдельно в pending_check.
 Для завершённого отдыха верни rest_event: {kind,evidence}, где kind — short_rest или long_rest, evidence — фраза из новой реплики о завершении отдыха. Для состоявшегося использования умения без отдельного броска верни ability_event: {name,evidence}, где name совпадает с карточкой и evidence описывает применение в этом ходе. Дыхание дракона и Второе дыхание с проверкой расходует сервер. При изменении описания существующего умения сохраняй текущие заряды.
@@ -909,11 +909,13 @@ def _quest_steps_open(quest):
     return isinstance(stages, list) and any(isinstance(stage, dict) and not stage.get("done") for stage in stages)
 
 
-def _merge_quests(old, changes):
+def _merge_quests(old, changes, latest):
     merged = [quest for value in old if (quest := normalize_quest(value))]
     for change in changes:
         if not isinstance(change, dict) or not _quest_name(change):
             continue
+        change = dict(change)
+        reward_terms = change.pop("reward_terms_evidence", None)
         name = _quest_name(change)
         index = next((i for i, quest in enumerate(merged)
                       if (change.get("id") and quest.get("id") == change["id"])
@@ -946,8 +948,22 @@ def _merge_quests(old, changes):
             updated.pop("reward_status", None)
         if previous.get("status") in {"completed", "failed"}:
             updated["status"] = previous["status"]
-        if previous.get("rewards"):
-            updated["rewards"] = previous["rewards"]
+        saved_rewards = previous.get("rewards")
+        if saved_rewards:
+            updated["rewards"] = saved_rewards
+            proposed_rewards = change.get("rewards")
+            if (previous.get("status") in {"offered", "active"}
+                    and isinstance(saved_rewards, dict) and isinstance(proposed_rewards, dict)
+                    and _grounded_event(reward_terms, latest)):
+                mentioned = coin_mentions(reward_terms)
+                missing_coins = {
+                    coin: amount for coin, amount in mentioned
+                    if coin not in saved_rewards
+                    and type(proposed_rewards.get(coin)) is int
+                    and proposed_rewards[coin] == amount
+                    and sum(other == coin for other, _ in mentioned) == 1
+                }
+                updated["rewards"] = {**saved_rewards, **missing_coins}
         previous_stages = previous.get("stages")
         changed_stages = change.get("stages")
         if isinstance(previous_stages, list) and previous_stages:
@@ -1549,7 +1565,7 @@ def _engine_command(state, query, check):
     return advance_action(updated,60), reply
 
 
-def _apply_conditional_rewards(merged, current, newly_completed, outcomes, latest):
+def _apply_conditional_rewards(merged, newly_completed, outcomes, latest):
     changes = {}
     controlled = any(quest.get("reward_condition") for quest in newly_completed.values())
     quests = {quest.get("id"): quest for quest in merged["quests"]
@@ -1574,10 +1590,6 @@ def _apply_conditional_rewards(merged, current, newly_completed, outcomes, lates
                 amount = rewards.get(key)
                 if type(amount) is int and amount > 0:
                     changes[key] = changes.get(key, 0) + amount
-    if controlled:
-        for currency in ("gold", "silver", "copper"):
-            if type(current.get(currency, 0)) is not int:
-                current[currency] = 0
     return changes, controlled
 
 
@@ -1772,8 +1784,17 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
         new_state.pop("agenda", None)
     fact_updates = new_state.pop("facts", None)
     campaign_facts = merge_facts(current.get("facts"), [])
-    campaign_facts = record_npc_actions(campaign_facts, new_state.pop("npc_actions", None),
-                                        campaign_scene, minute, grounded)
+    npc_actions = new_state.pop("npc_actions", None)
+    npc_actions = npc_actions[:8] if isinstance(npc_actions, list) else []
+    # Some replies put NPC actions under facts. Keep the same evidence checks.
+    for fact in fact_updates[:12] if isinstance(fact_updates, list) else []:
+        if not isinstance(fact, dict) or fact.get("status") != "confirmed":
+            continue
+        fact_id = fact.get("id")
+        if isinstance(fact_id, str) and fact_id.startswith("npc-action:"):
+            npc_actions.append({"id": fact_id.removeprefix("npc-action:"),
+                                "actor": fact.get("subject"), "evidence": fact.get("detail")})
+    campaign_facts = record_npc_actions(campaign_facts, npc_actions, campaign_scene, minute, grounded)
     effect_proposals = new_state.pop("effects", None)
     # Never trust direct writes to engine-owned fields, including legacy extraction.
     for protected in ("active_effects", "effect_log", "mana", "max_mana", "hero_form",
@@ -2060,6 +2081,7 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
     merged["quests"] = _merge_quests(
         old_quests if isinstance(old_quests, list) else [],
         quest_changes if isinstance(quest_changes, list) else [],
+        latest,
     )
     # Preserve arrays when the model accidentally returns empty/missing arrays.
     for f in ("inventory", "notes", "conditions", "relationships", "faction_clocks",
@@ -2111,13 +2133,10 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
         name: quest for name, quest in quests_by_name.items()
         if name and name not in old_completed and quest.get("status") == "completed" and not _quest_steps_open(quest)
     }
-    conditional_awards, controls_wallet = _apply_conditional_rewards(
-        merged, current, newly_completed, reward_outcomes, latest,
+    quest_awards, controls_wallet = _apply_conditional_rewards(
+        merged, newly_completed, reward_outcomes, latest,
     )
-    if controls_wallet:
-        for currency in ("gold", "silver", "copper"):
-            merged[currency] = current.get(currency, 0) + conditional_awards.get(currency, 0)
-    xp += conditional_awards.get("xp", 0)
+    xp += quest_awards.get("xp", 0)
     for event_id, awards in fresh_events:
         for amount, name in awards:
             if not name and event_id == last_event_id and controls_wallet:
@@ -2144,13 +2163,24 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
         processed.append(event_id)
     for name, quest in newly_completed.items():
         reward = quest.get("rewards")
-        promised = reward.get("xp") if isinstance(reward, dict) else None
-        if (not quest.get("reward_condition") and name not in paid and str(quest.get("id", "")) not in paid_ids
+        if quest.get("reward_condition") or not isinstance(reward, dict):
+            continue
+        for currency in COINS:
+            amount = reward.get(currency)
+            if type(amount) is int and amount > 0:
+                quest_awards[currency] = quest_awards.get(currency, 0) + amount
+        promised = reward.get("xp")
+        if (name not in paid and str(quest.get("id", "")) not in paid_ids
                 and type(promised) is int and promised > 0):
             xp += promised
             paid.add(name)
             if isinstance(quest.get("id"), str):
                 paid_ids.add(quest["id"])
+    # Server trades already updated current. A model balance may include the quest award.
+    for currency, balance in wallet(current).items():
+        award = quest_awards.get(currency, 0)
+        if controls_wallet or award:
+            merged[currency] = balance + award
     merged["quest_xp_awards"] = sorted(paid)
     merged["quest_xp_paid_ids"] = sorted(paid_ids)
     if last_event_id:
@@ -2838,7 +2868,7 @@ def api_chat():
                         return
                     choice = response.choices[0] if getattr(response, "choices", None) else None
                     message = getattr(choice, "message", None)
-                    text = (getattr(message, "content", "") or "").strip()
+                    text = DeltaStream().feed(getattr(message, "content", "") or "").strip()
                     finish = getattr(choice, "finish_reason", None)
                     usage = getattr(response, "usage", None)
                     last_usage = usage or last_usage
@@ -2874,7 +2904,7 @@ def api_chat():
                 stream = None
                 usage = None
                 model = MODEL
-                parser = DeltaStream() if inline_enabled else None
+                parser = DeltaStream()
                 content_chars = 0
                 reasoning_chars = 0
                 finish = None
@@ -2903,7 +2933,7 @@ def api_chat():
                             # готовый ответ целиком, без дельт.
                             message = getattr(choice, "message", None)
                             text = getattr(message, "content", None) if message is not None else None
-                        if text and parser is not None:
+                        if text:
                             text = parser.feed(text)
                         if text:
                             content_chars += len(text)
@@ -2931,9 +2961,9 @@ def api_chat():
                         if usage is not None:
                             last_usage = usage
                         TOKEN_USAGE.record(turn_id, "chat", model, usage)
-                if emitted and parser is not None:
+                if emitted and inline_enabled:
                     inline_data["delta"] = parser.finish()
-                if emitted and finish != "stop" and not (finish == "length" and parser is not None and parser.in_delta):
+                if emitted and finish != "stop" and not (finish == "length" and parser.in_delta):
                     yield "\n[Ошибка API: ответ мастера оборвался. Ход можно повторить.]"
                     return
                 if diag.get("reasoning_rejected"):

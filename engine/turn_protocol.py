@@ -4,6 +4,7 @@ import math
 
 START = '[[STATE_DELTA]]'
 END = '[[/STATE_DELTA]]'
+DELIMITERS = {START: END, '⟦STATE_DELTA⟧': '⟦/STATE_DELTA⟧'}
 MAX_DELTA_CHARS = 24000
 OBJECTS = set('scene elapsed clock_end pending_check cancel_check rest_event ability_event purchase exchange resource_events stats level_upgrade'.split())
 ARRAYS = set('schedule resolve_events reward_outcomes facts npc_actions inventory inventory_remove item_transfers notes quests conditions relationships faction_clocks dc_modifier_reasons proficiencies skills abilities languages world_entities effects shop_offers blueprints'.split())
@@ -55,24 +56,30 @@ class DeltaStream:
     def __init__(self):
         self.pending = ''
         self.hidden = ''
-        self.in_delta = False
+        self.end_marker = None
         self.overflow = False
+
+    @property
+    def in_delta(self):
+        return self.end_marker is not None
 
     def feed(self, text):
         if self.in_delta:
             self._append(text)
             return ''
         self.pending += text
-        index = self.pending.find(START)
-        if index >= 0:
+        matches = [(index, marker) for marker in DELIMITERS
+                   if (index := self.pending.find(marker)) >= 0]
+        if matches:
+            index, marker = min(matches)
             visible = self.pending[:index]
-            self.in_delta = True
-            self._append(self.pending[index+len(START):])
+            self.end_marker = DELIMITERS[marker]
+            self._append(self.pending[index + len(marker):])
             self.pending = ''
             return visible
-        # Preserve only a suffix that might be the start of the marker.
-        keep = next((n for n in range(min(len(START)-1,len(self.pending)),0,-1)
-                     if self.pending.endswith(START[:n])),0)
+        # Preserve only a suffix that might be the start of a marker.
+        keep = max((n for marker in DELIMITERS for n in range(1, len(marker))
+                    if self.pending.endswith(marker[:n])), default=0)
         visible = self.pending[:-keep] if keep else self.pending
         self.pending = self.pending[-keep:] if keep else ''
         return visible
@@ -86,9 +93,9 @@ class DeltaStream:
     def finish(self):
         # A partial marker is not story content; discard it at end of stream.
         self.pending = ''
-        if not self.in_delta or self.overflow or self.hidden.count(END) != 1:
+        if not self.in_delta or self.overflow or self.hidden.count(self.end_marker) != 1:
             return None
-        payload, _, trailing = self.hidden.partition(END)
+        payload, _, trailing = self.hidden.partition(self.end_marker)
         if trailing.strip():
             return None
         try:

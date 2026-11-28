@@ -2,6 +2,7 @@
 If Flask/OpenAI are unavailable, minimal import stubs are used, not HTTP tests.
 """
 import importlib.util
+import json
 import logging
 import os
 import sys
@@ -80,6 +81,114 @@ class InlineIntegrationTest(unittest.TestCase):
         self.assertEqual(saved['state']['world_entities'][0]['name'],'Зеркальный волк')
         self.assertEqual(saved['messages'][-1]['content'],story)
         self.assertNotIn('_state_delta',saved['messages'][-1])
+
+    def test_unicode_metadata_is_hidden_and_committed(self):
+        story = 'Лина возвращается в таверну.'
+        wire = story + '⟦STATE_DELTA⟧{"scene":{"location":"Таверна"}}⟦/STATE_DELTA⟧'
+        self.assertEqual(self.stream(wire), story + self.m.TURN_COMPLETE)
+        with patch.object(self.m, '_measured_completion', side_effect=AssertionError('Unexpected fallback')):
+            saved = self.commit()
+        self.assertEqual(saved['state']['scene']['location'], 'Таверна')
+        self.assertEqual(saved['messages'][-1]['content'], story)
+
+    def test_quest_coins_are_committed_once_alongside_xp(self):
+        quest = {
+            'id': 'parcel', 'name': 'Возвращение', 'status': 'active',
+            'stages': [{'text': 'Вернуть посылку', 'done': False}],
+            'rewards': {'xp': 50, 'gold': 6, 'silver': 2, 'copper': 3},
+        }
+        state = self.m.PARTIES.get(self.owner, self.party)['state']
+        state = {**state, 'gold': 4, 'silver': 3, 'copper': 2, 'quests': [quest]}
+        self.party = uuid4().hex
+        self.m.PARTIES.create(self.owner, self.party, state, [])
+        self.data.update(party_id=self.party, action={'content': 'Возвращаю посылку.'})
+        story = 'Посылка доставлена. Ты получаешь шесть золотых.'
+        completed = {'id': 'parcel', 'name': 'Возвращение', 'status': 'completed',
+                     'stages': [{'text': 'Вернуть посылку', 'done': True}]}
+        delta = {'quests': [completed], 'gold': 10, 'resource_events': {'wallet': story}}
+        wire = story + START + json.dumps(delta, ensure_ascii=False) + END
+        self.assertEqual(self.stream(wire), story + self.m.TURN_COMPLETE)
+        with patch.object(self.m, '_measured_completion', side_effect=AssertionError('Unexpected fallback')):
+            saved = self.commit()
+            self.assertEqual(saved, self.commit())
+        self.assertIn('Золото 4 → 10', saved['messages'][-1]['resolution'])
+        reloaded = self.m.PARTIES.get(self.owner, self.party)
+        history = [*reloaded['messages'], {'role': 'user', 'content': 'Проверяю квест.'},
+                   {'role': 'assistant', 'content': 'Посылка уже доставлена.'}]
+        next_state = self.m.extract_state(history, reloaded['state'], inline_delta={'quests': [completed]})
+        for updated in (reloaded['state'], next_state):
+            self.assertEqual(updated['xp'], 50)
+            self.assertEqual((updated['gold'], updated['silver'], updated['copper']), (10, 5, 5))
+
+    def test_quest_coins_wait_for_completion_and_separate_payment_condition(self):
+        state = self.m.PARTIES.get(self.owner, self.party)['state']
+        ordinary = {'id': 'open', 'name': 'Доклад', 'status': 'active', 'rewards': {'gold': 9},
+                    'stages': [{'text': 'Сдать доклад', 'done': False}]}
+        conditional = {'id': 'sealed', 'name': 'Печать', 'status': 'active',
+                       'reward_condition': 'Печать не вскрыта', 'rewards': {'silver': 7}}
+        state = {**state, 'quests': [ordinary, conditional]}
+        history = [{'role': 'user', 'content': 'Показываю письмо.'},
+                   {'role': 'assistant', 'content': 'Письмо принято. Печать ещё не проверили.'}]
+        closed = [{**quest, 'status': 'completed'} for quest in state['quests']]
+        pending = self.m.extract_state(history, state, inline_delta={'quests': closed})
+        self.assertEqual({q['id']: q['status'] for q in pending['quests']},
+                         {'open': 'active', 'sealed': 'completed'})
+        self.assertEqual((pending['gold'], pending['silver']), (0, 0))
+        evidence = 'Проверяющий подтверждает, что печать не вскрыта.'
+        history += [{'role': 'user', 'content': 'Жду проверки.'},
+                    {'role': 'assistant', 'content': evidence}]
+        event = {'id': 'sealed', 'outcome': 'met', 'evidence': evidence}
+        paid = self.m.extract_state(history, pending, inline_delta={'reward_outcomes': [event, event]})
+        self.assertEqual((paid['gold'], paid['silver']), (0, 7))
+
+    def test_explicit_coin_terms_can_fill_missing_quest_reward(self):
+        quest = {'id': 'parcel', 'name': 'Возвращение', 'status': 'active',
+                 'rewards': {'xp': 50, 'gold': 2}}
+        state = {**self.m.PARTIES.get(self.owner, self.party)['state'], 'quests': [quest]}
+        evidence = 'Награда за возвращение посылки — 6 серебряных.'
+        history = [{'role': 'user', 'content': 'Сдаю посылку.'},
+                   {'role': 'assistant', 'content': evidence}]
+        patch = {**quest, 'status': 'completed',
+                 'rewards': {'xp': 500, 'gold': 20, 'silver': 6, 'copper': 99},
+                 'reward_terms_evidence': evidence}
+        updated = self.m.extract_state(history, state, inline_delta={'quests': [patch]})
+        self.assertEqual(updated['quests'][0]['rewards'], {'xp': 50, 'gold': 2, 'silver': 6})
+        self.assertNotIn('reward_terms_evidence', updated['quests'][0])
+        self.assertEqual((updated['xp'], updated['gold'], updated['silver'], updated['copper']),
+                         (50, 2, 6, 0))
+        unsupported = self.m.extract_state(history, state, inline_delta={
+            'quests': [{**patch, 'reward_terms_evidence': 'Мастер обещал много монет.'}],
+        })
+        self.assertEqual(unsupported['quests'][0]['rewards'], quest['rewards'])
+        self.assertEqual(unsupported['silver'], 0)
+
+    def test_metadata_is_hidden_with_inline_state_disabled(self):
+        story = 'Лина позволяет Забытому взять её за руку.'
+        delta = {'facts': [{'id': 'npc-action:lina-accepts-hand', 'subject': 'Лина',
+                           'detail': story, 'source': 'Видимое повествование',
+                           'holder': '', 'status': 'confirmed'}]}
+        wire = story + '⟦STATE_DELTA⟧' + json.dumps(delta, ensure_ascii=False) + '⟦/STATE_DELTA⟧'
+        response = types.SimpleNamespace(choices=[types.SimpleNamespace(
+            finish_reason='stop', message=types.SimpleNamespace(content=json.dumps(delta)))])
+        with patch.object(self.m, 'INLINE_STATE_ENABLED', False):
+            self.assertEqual(self.stream(wire), story + self.m.TURN_COMPLETE)
+            with patch.object(self.m, '_measured_completion', return_value=response) as call:
+                saved = self.commit()
+            self.assertEqual(call.call_count, 1)
+        self.assertEqual(saved['messages'][-1]['content'], story)
+        self.assertEqual(saved['state']['facts'][0]['id'], 'npc-action:lina-accepts-hand')
+
+    def test_legacy_npc_action_requires_confirmation_in_visible_story(self):
+        detail = 'Лина позволяет Забытом взять её за руку; напряжение в её пальцах понемногу слабеет.'
+        fact = {'id': 'npc-action:lina-accepts-hand', 'subject': 'Лина', 'detail': detail,
+                'source': 'Видимое повествование', 'holder': '', 'status': 'confirmed'}
+        state = self.m.PARTIES.get(self.owner, self.party)['state']
+        for reply, expected in ((detail, [fact['id']]), ('Лина отдёргивает руку.', [])):
+            with self.subTest(reply=reply):
+                history = [{'role': 'user', 'content': 'Беру Лину за руку.'},
+                           {'role': 'assistant', 'content': reply}]
+                updated = self.m.extract_state(history, state, inline_delta={'facts': [fact]})
+                self.assertEqual([record['id'] for record in updated['facts']], expected)
 
     def test_broken_metadata_uses_old_extractor(self):
         story='Ты входишь в город.'
