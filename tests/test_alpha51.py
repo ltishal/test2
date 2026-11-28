@@ -72,6 +72,28 @@ class Alpha51Test(unittest.TestCase):
         self.assertEqual(exchange_from_story(action, reply), {'from': 'silver', 'to': 'copper', 'amount': 1})
         self.assertIsNone(exchange_from_story(action, 'Торговец готов отсчитать десять медных.'))
 
+    def test_market_keeps_both_priced_items_from_one_quote(self):
+        reply = ('Торговец Орен раскладывает на прилавке товары и говорит: '
+                 '«Есть один разводной ключ — за 8 серебряных, и три стопорных '
+                 'штифта — по 2 серебряных за штуку». Покупки не происходит.')
+        state = {**self.state, 'silver': 4}
+        state['shop_offers'] = merge_offers(state, [], reply)
+        key_offer, pin_offer = current_offers(state)
+        self.assertEqual([(offer['stock'], offer['price']) for offer in (key_offer, pin_offer)],
+                         [(1, 8), (3, 2)])
+        refresh = ('Орен кивает на прилавок: «Разводной ключ — один в наличии, 8 серебряных за штуку. '
+                   'Стопорных штифтов — три, по 2 серебряных за штуку».')
+        refreshed = merge_offers(state, [], refresh)
+        self.assertEqual([(offer['stock'], offer['price']) for offer in refreshed], [(1, 8), (3, 2)])
+        self.assertEqual([offer['offer_id'] for offer in refreshed],
+                         [key_offer['offer_id'], pin_offer['offer_id']])
+        with self.assertRaisesRegex(ValueError, 'в кошельке'):
+            settle_offer(state, key_offer, 1)
+        self.assertEqual(state['silver'], 4)
+        settle_offer(state, pin_offer, 1)
+        self.assertEqual(state['silver'], 2)
+        self.assertEqual([offer['stock'] for offer in current_offers(state)], [1, 2])
+
     def test_market_replays_two_live_scenes(self):
         samples = (
             ('Торговец при воротах отвечает: «Дорожный паёк — 5 серебряных». Он сверяется с полкой и сообщает: осталось **две штуки**. Ты ничего не покупаешь.', 2, 5),

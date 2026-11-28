@@ -257,6 +257,7 @@ NPC_ROLES = {
     'стражник': 'страж', 'сторож': 'сторож', 'наниматель': 'наниматель',
     'спутник': 'спутник', 'проводник': 'проводник', 'дворф': 'дворф', 'возница': 'возница',
     'архивист': 'архивист', 'архивистка': 'архивист', 'механик': 'механик',
+    'смотритель': 'смотритель', 'смотрительница': 'смотрительница',
 }
 ROLE_WORD = r"(?i:" + '|'.join(NPC_ROLES) + r")"
 ROLE_NAME = re.compile(rf"\b({ROLE_WORD})(?:-{ROLE_WORD})?\s+({PERSON_NAME})\b")
@@ -267,11 +268,15 @@ ROLE_NAME_REVERSED = re.compile(
     rf"\b({PERSON_NAME})\s*(?:,\s*|[—–]\s*)(?:(?i:портовый)\s+)?"
     rf"(?:(?i:дворф)-)?({ROLE_WORD})\b"
 )
+NPC_DELIVERY = re.compile(
+    rf'(?:^|(?<=[.!?])\s+)((?:На|В|У) [а-яё-]+(?: [а-яё-]+){{0,5}}) '
+    rf'({PERSON_NAME}) (?i:(?:оказывается на месте и )?принимает (?:письмо|посылку|доставку))\b'
+)
 GOBLIN_ENCOUNTER = re.compile(r'\b(?:трое|три|3)\s+гоблин(?:а|ов)\b', re.I)
 GOBLIN_POSITIONS = {
     'повозка': r'целит(?:ся|ься)|у повозк|ближайш|засадник',
     'ветви': r'перекрыва\w* дорогу|ветв|попер[её]к',
-    'лес': r'пятится|к лесу|у леса|лесно[йго]+|отступа',
+    'лес': r'пятится|к лесу|у (?:края )?леса|лесно[йго]+|отступа',
 }
 # Position aliases connect initial narration to later model patches.
 GOBLIN_NAMES = {'повозка': 'Гоблин у повозки', 'ветви': 'Гоблин за поваленными ветвями',
@@ -331,9 +336,7 @@ def entry_roles(entry):
 
 def restore_scene_people(entities, scene, reply, previous_scene=None, hero_name=None):
     """Recover named people and clearly enumerated opponents omitted from a delta."""
-    location = scene.get('location') if isinstance(scene, dict) else None
-    if not location:
-        return entities
+    location = (scene.get('location') or '') if isinstance(scene, dict) else ''
     if isinstance(previous_scene, dict) and previous_scene.get('location') and re.search(
             r'\b(?:оба|обе|они)\b[^.]{0,50}\bоста[лются]+\w*\s+позади', reply, re.I):
         location = previous_scene['location']
@@ -351,7 +354,7 @@ def restore_scene_people(entities, scene, reply, previous_scene=None, hero_name=
         role = NPC_ROLES[role.casefold()]
         local = [entry for entry in entities if entry.get('kind') == 'npc'
                  and any(key(name) == key(alias) for alias in entity_names(entry))
-                 and key(entry.get('location')) in ('', key(location))]
+                 and (not location or key(entry.get('location')) in ('', key(location)))]
         if any(role in entry_roles(entry) for entry in local):
             continue
         if remote_name_claim(entities, name, key(location), reply):
@@ -363,6 +366,18 @@ def restore_scene_people(entities, scene, reply, previous_scene=None, hero_name=
             continue
         entities.append({'id': uuid4().hex, 'kind': 'npc', 'name': name, 'location': location,
                          'description': role.capitalize() + '.', 'role': role, 'life_state': 'alive'})
+
+    for meeting in NPC_DELIVERY.finditer(clean):
+        destination, name = meeting.groups()
+        if key(name) == key(hero_name) or any(
+                entry.get('kind') == 'npc' and any(key(alias) == key(name) for alias in entity_names(entry))
+                for entry in entities):
+            continue
+        entities.append({'id': uuid4().hex, 'kind': 'npc', 'name': name, 'location': destination,
+                         'description': 'Принял доставку.', 'evidence': meeting[0].strip(),
+                         'life_state': 'alive'})
+    if not location:
+        return entities
 
     encounter = GOBLIN_ENCOUNTER.search(clean)
     if encounter:
@@ -543,5 +558,5 @@ NPC_CONTINUITY_PROMPT = (
 
 
 WORLD_PROMPT = '''
-ДИНАМИЧЕСКИЙ МИР. Не ограничивай фантазию каталогом. Для новых значимых существ, NPC, предметов, локаций, фракций и способностей верни world_entities: [{kind,name,description,location,traits,status,evidence}]. kind: npc, creature, item, location, faction, ability или other. Для боевого существа можешь при создании или при вступлении ранее мирного NPC в бой указать threat: minor, normal, dangerous, elite, legendary (относительная сила в мире, не подстраивай под героя). HP вычисляет сервер в пределах диапазона силы, не возвращай hp/max_hp. Для разных одноимённых объектов передавай new_entity:true только при первом появлении, для обновления обязательно ID; одноимённые NPC могут иметь одинаковое имя. Для предмета с экипировкой передай mechanics:{slot:weapon,dice,element,stat} или {slot:armor,defense,dex_cap}. Для обновления существующей записи используй точный id из world_entities контекста, не меняй имя и вид напрямую. Если NPC назвал своё имя, обнови прежний id и укажи known_name, подтверждённое фразой evidence; не создавай дубль. Для локации указывай access: open, closed или restricted по фактическому доступу, отдельно от факта обнаружения. evidence — дословная фраза нового видимого повествования, не фантазия игрока и не пересказ. Не сохраняй неподтверждённые догадки как события. Не воскрешай побеждённых существ без особого сюжетного разрешения. Для новой проверки урона по зарегистрированному существу добавь в pending_check точный world_target_id и target (имя этого существа). Если существо впервые создаётся этим же ходом, вместо ID передай world_target: true и точное имя target. npc_rule_effect — уже вычисленный итог броска по существу, не пересчитывай его. Не объявляй окончательное убийство до разрешения броска. Новые необычные свойства допустимы как сюжетные факты, но не создают автоматическую игровую механику сами по себе.
+ДИНАМИЧЕСКИЙ МИР. Не ограничивай фантазию каталогом. Вноси в энциклопедию каждого названного NPC, которого герой действительно встретил, включая нанимателя и получателя доставки в промежуточной сцене. Укажи место самой встречи. Для новых значимых существ, NPC, предметов, локаций, фракций и способностей верни world_entities: [{kind,name,description,location,traits,status,evidence}]. kind: npc, creature, item, location, faction, ability или other. Для боевого существа можешь при создании или при вступлении ранее мирного NPC в бой указать threat: minor, normal, dangerous, elite, legendary (относительная сила в мире, не подстраивай под героя). HP вычисляет сервер в пределах диапазона силы, не возвращай hp/max_hp. Для разных одноимённых объектов передавай new_entity:true только при первом появлении, для обновления обязательно ID; одноимённые NPC могут иметь одинаковое имя. Для предмета с экипировкой передай mechanics:{slot:weapon,dice,element,stat} или {slot:armor,defense,dex_cap}. Для обновления существующей записи используй точный id из world_entities контекста, не меняй имя и вид напрямую. Если NPC назвал своё имя, обнови прежний id и укажи known_name, подтверждённое фразой evidence; не создавай дубль. Для локации указывай access: open, closed или restricted по фактическому доступу, отдельно от факта обнаружения. evidence — дословная фраза нового видимого повествования, не фантазия игрока и не пересказ. Не сохраняй неподтверждённые догадки как события. Не воскрешай побеждённых существ без особого сюжетного разрешения. Для новой проверки урона по зарегистрированному существу добавь в pending_check точный world_target_id и target (имя этого существа). Если существо впервые создаётся этим же ходом, вместо ID передай world_target: true и точное имя target. npc_rule_effect — уже вычисленный итог броска по существу, не пересчитывай его. Не объявляй окончательное убийство до разрешения броска. Новые необычные свойства допустимы как сюжетные факты, но не создают автоматическую игровую механику сами по себе.
 '''

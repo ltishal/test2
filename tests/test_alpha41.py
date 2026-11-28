@@ -30,6 +30,35 @@ class Alpha41Test(unittest.TestCase):
         self.assertEqual(by_position['лес']['hp'], 8)
         self.assertEqual(by_position['лес']['life_state'], 'alive')
 
+    def test_delivery_records_discovered_npcs_when_model_omits_their_cards(self):
+        entries = restore_scene_people([], {},
+            'Смотрительница Лина проверяет лампы. Она просит отнести лампу брату Тому.',
+            hero_name='Мира')
+        self.assertEqual([entry['name'] for entry in entries], ['Лина'])
+        lina_id = entries[0]['id']
+        delivery = ('Лина снимает лампу со стола и вручает её Мире. '
+                    'На соседнем посту Том оказывается на месте и принимает доставку.')
+        scene = {'location': 'Каменный двор'}
+        restore_scene_people(entries, scene, delivery, hero_name='Мира')
+        restore_scene_people(entries, scene, delivery, hero_name='Мира')
+        restore_scene_people(entries, {'location': 'Дальний шлюз'},
+                             'Незнакомец у шлюза называет себя Томом, братом Лины.', hero_name='Мира')
+        self.assertEqual([entry['name'] for entry in entries], ['Лина', 'Том'])
+        self.assertEqual(entries[0]['id'], lina_id)
+        self.assertEqual(entries[1]['location'], 'На соседнем посту')
+
+    def test_goblins_at_cart_branches_and_forest_edge_have_equal_starting_health(self):
+        reply = ('Между стволами и низкими зарослями видны трое гоблинов-разведчиков. '
+                 'Они целы. У повозки один возится с ремнём на грузе; второй присел за '
+                 'поваленными ветвями; третий стоит у края леса и поглядывает вдоль дороги.')
+        scene = {'location': 'Лесная тропа'}
+        entries = restore_scene_people([], scene, reply)
+        self.assertEqual({entry['encounter_position'] for entry in entries}, {'повозка', 'ветви', 'лес'})
+        self.assertEqual([(entry['hp'], entry['max_hp']) for entry in entries], [(8, 8)] * 3)
+        ids = [entry['id'] for entry in entries]
+        restore_scene_people(entries, scene, reply)
+        self.assertEqual([entry['id'] for entry in entries], ids)
+
     def test_named_creatures_and_legacy_health(self):
         scene = {'location': 'Амбар'}
         entries = restore_scene_people([], scene,

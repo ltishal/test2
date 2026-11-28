@@ -53,7 +53,8 @@ def item_key(name):
 
 
 def item_words(value):
-    return re.sub(r'\b(?:паек|пайк(?:а|у|ом|е|и|ов|ам|ами|ах))\b', 'паек', trade_key(value))
+    value = re.sub(r'\b(?:паек|пайк(?:а|у|ом|е|и|ов|ам|ами|ах))\b', 'паек', trade_key(value))
+    return re.sub(r'\bштифт(?:а|у|ом|е|ы|ов|ам|ами|ах)\b', 'штифт', value)
 
 
 def same_item(left, right):
@@ -89,6 +90,17 @@ EXPLICIT_QUOTE = re.compile(
     rf"(?:(?:ещ[её]\s+)?({COUNT}),\s+стоит\s+|стоит\s+|[—–]\s*(?:по\s+)?)"
     rf"({COUNT})\s+(золот\w*|серебрян\w*|медн\w*|зм|см|мм)\b"
     r"(?:\s+за\s+(?:штук\w*|кажд\w*)\b)?", re.I
+)
+COUNTED_LIST_QUOTE = re.compile(
+    rf'(?:^|[«"]|,\s*(?:и\s+)?|\b(?:есть|в наличии)\s+)'
+    rf'({COUNT})\s+([а-яё-]+(?:\s+[а-яё-]+){{0,4}}?)\s*[—–]\s*(?:за|по)\s+'
+    rf'{COUNT}\s+(?:золот\w*|серебрян\w*|медн\w*|зм|см|мм)\b', re.I,
+)
+ITEM_STOCK_QUOTE = re.compile(
+    rf'(?:^|[«"]|[.!?]\s+)([а-яё-]+(?:\s+[а-яё-]+){{0,4}}?)\s*[—–]\s*'
+    rf'({COUNT})(?:\s+в наличии)?\s*,\s*(?:по\s+)?'
+    rf'{COUNT}\s+(?:золот\w*|серебрян\w*|медн\w*|зм|см|мм)\b'
+    r'\s+за\s+(?:штук\w*|кажд\w*)\b', re.I,
 )
 DISPLAYED_LIST = re.compile(rf'\bпоказыва(?:я|ет)\s+({COUNT}\b[^.!?;]{{4,130}})[.!?]', re.I)
 DISPLAYED_COUNT = re.compile(
@@ -171,8 +183,12 @@ def offer_stock(item, evidence):
     clean = proof_text(evidence)
     quotes = [match for match in EXPLICIT_QUOTE.finditer(clean) if same_item(match[1], item)]
     counts = [match[2] for match in quotes if match[2]]
-    if len(counts) == 1:
-        count, = counts
+    counts.extend(match[1] for match in COUNTED_LIST_QUOTE.finditer(clean)
+                  if same_item(match[2], item))
+    counts.extend(match[2] for match in ITEM_STOCK_QUOTE.finditer(clean)
+                  if same_item(match[1], item))
+    if len(set(counts)) == 1:
+        count = counts[0]
         return int(count) if count.isdigit() else WORDS[count.casefold()]
     shown = displayed_offer(item, clean)
     if shown:
@@ -219,6 +235,13 @@ def offers_from_story(reply, action=""):
         currency, amount = price[0]
         quotes.append({"item": name, "currency": currency, "price": amount, "stock": 1 if stock is None else stock,
                        "stock_explicit": stock is not None, "evidence": evidence})
+    counted = [(match[1], match[2], match[0]) for match in COUNTED_LIST_QUOTE.finditer(clean)]
+    counted.extend((match[2], match[1], match[0]) for match in ITEM_STOCK_QUOTE.finditer(clean))
+    for count, name, evidence in counted:
+        currency, price = coin_mentions(evidence)[-1]
+        stock = int(count) if count.isdigit() else WORDS[count.casefold()]
+        quotes.append({"item": name, "currency": currency, "price": price, "stock": stock,
+                       "stock_explicit": True, "evidence": evidence.strip()})
     stocked = [(match[2], match[0]) for pattern in (STOCKED_QUOTE, HIS_STOCK_QUOTE)
                for match in pattern.finditer(clean)]
     stocked.extend((match[1], match[0]) for match in COUNTED_QUOTE.finditer(clean))
