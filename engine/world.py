@@ -159,20 +159,26 @@ def merge_entities(state, proposals, reply, *, previous_scene=None):
         name = text(patch.get('name'),160)
         kind = patch.get('kind')
         location = key(patch.get('location') or scene_location)
+        role_matches = []
         if kind == 'npc' or by_id.get(entity_id, {}).get('kind') == 'npc':
             claimed_name = text(patch.get('known_name'), 100) or name or by_id.get(entity_id, {}).get('name')
             if remote_name_claim(result, claimed_name, location, reply):
                 continue
+            role_matches = local_npcs_by_title(result, name, location)
         if entity_id:
             entity = by_id.get(entity_id)
             if entity is None: continue
             # An ID cannot be used to change the identity of another entity.
-            if (name and all(key(name) != key(alias) for alias in entity_names(entity))) or (kind and kind!=entity.get('kind')): continue
+            matches_name = not name or any(key(name) == key(alias) for alias in entity_names(entity))
+            if (not matches_name and entity not in role_matches) or (kind and kind != entity.get('kind')):
+                continue
         else:
             if not name or not isinstance(kind,str) or kind not in KINDS: continue
             matches = [e for e in result if e.get('kind')==kind and any(key(alias) == key(name) for alias in entity_names(e))]
             location = key(patch.get('location'))
-            if patch.get('new_entity') is True:
+            if role_matches:
+                matches = role_matches
+            elif patch.get('new_entity') is True:
                 matches = []
             elif location and kind in ('npc','creature','item','location'):
                 same = [e for e in matches if key(e.get('location')) == location]
@@ -273,6 +279,11 @@ NPC_DELIVERY = re.compile(
     rf'({PERSON_NAME}) (?i:(?:оказывается на месте и )?принимает (?:письмо|посылку|доставку))\b'
 )
 GOBLIN_ENCOUNTER = re.compile(r'\b(?:трое|три|3)\s+(?:[а-яё-]+\s+){0,2}гоблин(?:а|ов)\b', re.I)
+GOBLIN_REINFORCEMENTS = re.compile(
+    r'(?<!не )\b(?:выходит|показывается|появляется) второй гоблин\b'
+    r'[^.!?]{0,120}?(?<!не )\b(?:выходит|показывается|появляется) третий\b'
+    r'[^.!?]{0,80}[.!?]\s+(?:теперь\s+)?их\s+(?:трое|три|3)\b', re.I,
+)
 GOBLIN_POSITIONS = {
     'повозка': r'целит(?:ся|ься)|у повозк|ближайш|засадник',
     'ветви': r'перекрыва\w* дорогу|ветв|попер[её]к',
@@ -334,6 +345,32 @@ def entry_roles(entry):
     return {NPC_ROLES[role.casefold()] for role in re.findall(rf'\b{ROLE_WORD}\b', fields)}
 
 
+def npc_title_and_name(value):
+    name = key(value)
+    prefix = re.fullmatch(rf'({ROLE_WORD}) (.+)', name)
+    suffix = re.fullmatch(rf'(.+) \(({ROLE_WORD})\)', name)
+    if prefix:
+        return NPC_ROLES[prefix[1]], prefix[2]
+    if suffix:
+        return NPC_ROLES[suffix[2]], suffix[1]
+    return None, name
+
+
+def local_npcs_by_title(entities, name, location):
+    role, bare = npc_title_and_name(name)
+    if not role or not location:
+        return []
+    matches = []
+    for entry in entities:
+        if entry.get('kind') != 'npc' or key(entry.get('location')) != location:
+            continue
+        aliases = [npc_title_and_name(alias) for alias in entity_names(entry)]
+        if any(alias_name == bare and (alias_role == role or role in entry_roles(entry))
+               for alias_role, alias_name in aliases):
+            matches.append(entry)
+    return matches
+
+
 def restore_scene_people(entities, scene, reply, previous_scene=None, hero_name=None):
     """Recover named people and clearly enumerated opponents omitted from a delta."""
     location = (scene.get('location') or '') if isinstance(scene, dict) else ''
@@ -380,8 +417,12 @@ def restore_scene_people(entities, scene, reply, previous_scene=None, hero_name=
         return entities
 
     encounter = GOBLIN_ENCOUNTER.search(clean)
-    if encounter:
-        description = clean[encounter.start():encounter.end() + 300]
+    reinforcements = GOBLIN_REINFORCEMENTS.search(clean) if not encounter else None
+    if encounter or reinforcements:
+        if encounter:
+            description = clean[encounter.start():encounter.end() + 300]
+        else:
+            description = clean[max(0, reinforcements.start() - 120):reinforcements.end() + 150]
         positions = [position for position, pattern in GOBLIN_POSITIONS.items()
                      if re.search(pattern, description, re.I)]
         if len(positions) == 3 and re.search(r'\b(?:второй|другой)\b', description, re.I) and re.search(
@@ -390,7 +431,9 @@ def restore_scene_people(entities, scene, reply, previous_scene=None, hero_name=
                 local = [entry for entry in entities if entry.get('kind') in ('npc', 'creature')
                          and key(entry.get('location')) == key(location)
                          and encounter_position(entry['name']) == position]
-                if not local:
+                if len(local) == 1:
+                    combat_ready(local[0], 'minor')
+                elif not local:
                     entry = {'id': uuid4().hex, 'kind': 'creature', 'name': GOBLIN_NAMES[position],
                              'location': location, 'life_state': 'alive', 'encounter_position': position}
                     combat_ready(entry, 'minor')

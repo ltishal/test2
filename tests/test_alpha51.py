@@ -108,6 +108,21 @@ class Alpha51Test(unittest.TestCase):
         bulk = 'Орен подтверждает: «Стопорных штифтов — 3 штуки, 6 серебряных за весь набор».'
         self.assertEqual(merge_offers(self.state, [], bulk, action=action), [])
 
+    def test_market_separates_trailing_stock_from_item_name_and_price(self):
+        reply = ('Торговец Орен отвечает: «Разводных ключей два — по 8 серебряных за штуку. '
+                 'Стопорных штифтов двенадцать — по 2 медных за штуку».')
+        state = {**self.state, 'silver': 10, 'copper': 10, 'inventory': []}
+        state['shop_offers'] = merge_offers(state, [], reply)
+        keys, pins = current_offers(state)
+        self.assertEqual([(o['item'], o['stock'], o['price'], o['currency']) for o in (keys, pins)],
+                         [('Разводных ключей', 2, 8, 'silver'), ('Стопорных штифтов', 12, 2, 'copper')])
+        refreshed = merge_offers(state, [], 'Торговец Орен уточняет: «Разводной ключ — 2 штуки, '
+                                 'по 8 серебряных за штуку. Стопорных штифтов — 12 штук, по 2 медных за штуку».')
+        self.assertEqual([o['offer_id'] for o in refreshed], [keys['offer_id'], pins['offer_id']])
+        settle_offer(state, pins, 2)
+        self.assertEqual(state['copper'], 6)
+        self.assertEqual([o['stock'] for o in current_offers(state)], [2, 10])
+
     def test_market_replays_two_live_scenes(self):
         samples = (
             ('Торговец при воротах отвечает: «Дорожный паёк — 5 серебряных». Он сверяется с полкой и сообщает: осталось **две штуки**. Ты ничего не покупаешь.', 2, 5),

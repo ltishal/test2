@@ -36,6 +36,24 @@ class ProtocolTest(unittest.TestCase):
 
 
 class DynamicWorldTest(unittest.TestCase):
+    def test_role_qualified_namesake_updates_existing_local_npc(self):
+        scene = {'location': 'Двор заставы'}
+        state = {'scene': scene, 'world_entities': [
+            {'id': 'guard', 'kind': 'npc', 'name': 'Орен', 'role': 'страж', 'location': scene['location']},
+            {'id': 'merchant', 'kind': 'npc', 'name': 'Орен', 'role': 'торговец', 'location': scene['location']},
+        ]}
+        for name in ('Торговец Орен', 'Орен (торговец)'):
+            with self.subTest(name=name):
+                reply = f'{name} остаётся у прилавка.'
+                patch = {'kind': 'npc', 'name': name, 'location': scene['location'],
+                         'description': 'Торговец сейчас у прилавка.', 'evidence': reply, 'new_entity': True}
+                entries = merge_entities(state, [patch], reply)
+                self.assertEqual([entry['id'] for entry in entries], ['guard', 'merchant'])
+                self.assertNotIn('description', entries[0])
+                self.assertEqual(entries[1]['description'], patch['description'])
+                wrong = merge_entities(state, [{**patch, 'id': 'guard'}], reply)
+                self.assertEqual(wrong[0].get('description'), None)
+
     def test_named_remote_npc_survives_a_crowded_scene_after_many_turns(self):
         mara = {'id': 'mara', 'kind': 'npc', 'name': 'Мара', 'location': 'Серый Брод',
                 'description': 'Хозяйка трактира, отдала герою журнал.'}

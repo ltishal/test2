@@ -68,6 +68,22 @@ class Alpha41Test(unittest.TestCase):
         self.assertEqual({entry['encounter_position'] for entry in entries}, {'повозка', 'ветви', 'лес'})
         self.assertEqual([entry['max_hp'] for entry in entries], [8, 8, 8])
 
+    def test_staged_goblin_arrival_completes_roster_with_stable_id(self):
+        scene = {'location': 'Лесная тропа'}
+        entries = [{'id': 'scout', 'kind': 'creature', 'name': 'Гоблин-разведчик у повозки',
+                    'location': scene['location']}]
+        reply = ('Гоблин у повозки смотрит на тебя ещё миг, затем коротко свистит и зовёт своих. '
+                 'Из-за поваленных ветвей выходит второй гоблин, а с края леса показывается третий. '
+                 'Теперь их трое, считая того, что у повозки. Они держатся поодаль.')
+        restore_scene_people(entries, scene, reply)
+        restore_scene_people(entries, scene, reply)
+        self.assertEqual(len(entries), 3)
+        self.assertEqual(entries[0]['id'], 'scout')
+        self.assertEqual([(e['hp'], e['max_hp']) for e in entries], [(8, 8)] * 3)
+        uncertain = ('Гоблин у повозки свистит. Из-за поваленных ветвей не выходит второй гоблин, '
+                     'а с края леса не показывается третий. Может, их трое.')
+        self.assertEqual(restore_scene_people([], scene, uncertain), [])
+
     def test_named_creatures_and_legacy_health(self):
         scene = {'location': 'Амбар'}
         entries = restore_scene_people([], scene,

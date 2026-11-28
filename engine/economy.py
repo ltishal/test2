@@ -7,7 +7,10 @@ COINS = {"gold": ("зм", 100), "silver": ("см", 10), "copper": ("мм", 1)}
 LIMIT = 1_000_000
 WORDS = {"одну": 1, "одна": 1, "одной": 1, "один": 1,
          "две": 2, "два": 2, "три": 3, "четыре": 4, "пять": 5,
-         "шесть": 6, "семь": 7, "восемь": 8, "девять": 9, "десять": 10, "сто": 100}
+         "шесть": 6, "семь": 7, "восемь": 8, "девять": 9, "десять": 10,
+         "одиннадцать": 11, "двенадцать": 12, "тринадцать": 13, "четырнадцать": 14,
+         "пятнадцать": 15, "шестнадцать": 16, "семнадцать": 17, "восемнадцать": 18,
+         "девятнадцать": 19, "двадцать": 20, "сто": 100}
 COUNT = r"(?:[1-9][0-9]{0,5}|" + "|".join(WORDS) + ")"
 COIN_PHRASE = re.compile(
     rf"\b({COUNT})\s+(золот\w*|серебрян\w*|медн\w*|зм|см|мм)\b", re.I
@@ -54,7 +57,9 @@ def item_key(name):
 
 def item_words(value):
     value = re.sub(r'\b(?:паек|пайк(?:а|у|ом|е|и|ов|ам|ами|ах))\b', 'паек', trade_key(value))
-    return re.sub(r'\bштифт(?:а|у|ом|е|ы|ов|ам|ами|ах)\b', 'штифт', value)
+    value = re.sub(r'\bштифт(?:а|у|ом|е|ы|ов|ам|ами|ах)\b', 'штифт', value)
+    return re.sub(r'\bразводн(?:ой|ого|ому|ым|ые|ых|ыми) ключ(?:а|у|ом|е|и|ей|ам|ами|ах)?\b',
+                  'разводной ключ', value)
 
 
 def same_item(left, right):
@@ -91,6 +96,8 @@ EXPLICIT_QUOTE = re.compile(
     rf"({COUNT})\s+(золот\w*|серебрян\w*|медн\w*|зм|см|мм)\b"
     r"(?:\s+за\s+(?:штук\w*|кажд\w*)\b)?", re.I
 )
+TRAILING_STOCK = re.compile(rf'(.+?)\s+({COUNT})$', re.I)
+UNIT_PRICE_SUFFIX = re.compile(r'\bза\s+(?:штук\w*|кажд\w*)\b$', re.I)
 COUNTED_LIST_QUOTE = re.compile(
     rf'(?:^|[«"]|,\s*(?:и\s+)?|\b(?:есть|в наличии)\s+)'
     rf'({COUNT})\s+([а-яё-]+(?:\s+[а-яё-]+){{0,4}}?)\s*[—–]\s*(?:за|по)\s+'
@@ -185,11 +192,20 @@ def item_stock_quotes(evidence):
             yield name, count, match[0]
 
 
+def explicit_quote_item(match):
+    name = match[1].strip()
+    trailing = TRAILING_STOCK.fullmatch(name)
+    if not match[2] and trailing and (
+            re.search(r'[—–]\s*по\s+', match[0], re.I) or UNIT_PRICE_SUFFIX.search(match[0])):
+        return trailing[1], trailing[2]
+    return name, match[2]
+
+
 def offer_stock(item, evidence):
     """Associate a count with its quoted item even when several are shown together."""
     clean = proof_text(evidence)
-    quotes = [match for match in EXPLICIT_QUOTE.finditer(clean) if same_item(match[1], item)]
-    counts = [match[2] for match in quotes if match[2]]
+    quotes = (explicit_quote_item(match) for match in EXPLICIT_QUOTE.finditer(clean))
+    counts = [count for name, count in quotes if count and same_item(name, item)]
     counts.extend(match[1] for match in COUNTED_LIST_QUOTE.finditer(clean)
                   if same_item(match[2], item))
     counts.extend(count for name, count, _ in item_stock_quotes(clean)
@@ -214,7 +230,8 @@ def offers_from_story(reply, action=""):
     quotes = []
     clean = proof_text(reply)
     for match in EXPLICIT_QUOTE.finditer(clean):
-        name = re.sub(rf'^(?:{COUNT})\s+', '', match[1].strip(), flags=re.I)
+        quoted_name, _ = explicit_quote_item(match)
+        name = re.sub(rf'^(?:{COUNT})\s+', '', quoted_name, flags=re.I)
         price = coin_mentions(match[0])
         if not price or len(name.split()) > 6 or re.search(
                 r"\b(?:если|может|не|доступно|нужно|называ\w*|подтвержда\w*|говор\w*|"
