@@ -87,3 +87,22 @@ class Alpha51Test(unittest.TestCase):
                 self.assertEqual((offer['stock'], offer['price']), (count, price))
                 settle_offer(state, offer, 1)
                 self.assertEqual((current_offers(state)[0]['stock'], state['silver']), (count-1, 10-price))
+
+    def test_lens_city_market_pairs_each_price_with_its_displayed_stock(self):
+        state = {**self.state, 'silver': 12, 'inventory': []}
+        story = ('Торговец Тарен отодвигает край брезента на прилавке, показывая один разводной ключ '
+                 'и три стопорных штифта. — Ключ — восемь серебряных. Штифты — по два серебряных за штуку. '
+                 'Больше сейчас нет. Ты пока ничего не покупаешь.')
+        stale = {'item': 'Штифты', 'currency': 'silver', 'price': 2, 'stock': 1,
+                 'evidence': 'Штифты — по два серебряных за штуку'}
+        state['shop_offers'] = merge_offers(state, [stale], story)
+        offer_by_name = {offer['item']: offer for offer in current_offers(state)}
+        self.assertEqual({name: (offer['price'], offer['stock']) for name, offer in offer_by_name.items()},
+                         {'разводной ключ': (8, 1), 'Штифты': (2, 3)})
+        settle_offer(state, offer_by_name['Штифты'], 1)
+        repeated = 'Торговец Тарен отвечает. Разводной ключ ещё один, стоит восемь серебряных.'
+        state['shop_offers'] = merge_offers(state, [], repeated)
+        stored = {offer['offer_id']: offer['stock'] for offer in current_offers(state)}
+        self.assertEqual(stored, {offer_by_name['разводной ключ']['offer_id']: 1,
+                                  offer_by_name['Штифты']['offer_id']: 2})
+        self.assertEqual(state['silver'], 10)

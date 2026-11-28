@@ -544,6 +544,98 @@ class InlineIntegrationTest(unittest.TestCase):
         self.assertEqual(self.m._safe_name('../..'), '')
         self.assertLessEqual(len(self.m._safe_name('я' * 300).encode()), 128)
 
+    def test_alpha512_mechanic_and_homonymous_npcs_are_recorded_on_opening(self):
+        state = {**self.m.DEFAULT_STATE, 'name': 'Нерис', 'race': 'полуэльф', 'class': 'следопыт',
+                 'scene': {'location': 'Двор станции'}}
+        story = ('Возле лестницы механик Ильва проверяет связку инструментов. '
+                 'Торговец Тарен раскладывает товар у прилавка; страж Тарен несёт караул.')
+        history = [{'role': 'user', 'content': 'Осматриваюсь во дворе.'},
+                   {'role': 'assistant', 'content': story}]
+        updated = self.m.extract_state(history, state, inline_delta={})
+        people = updated['world_entities']
+        self.assertEqual({(npc['name'], npc['role']) for npc in people},
+                         {('Ильва', 'механик'), ('Тарен', 'страж'), ('Тарен', 'торговец')})
+        self.assertEqual(len({npc['id'] for npc in people}), 3)
+
+    def test_alpha512_confirmed_loan_is_added_once(self):
+        state = {**self.m.DEFAULT_STATE, 'name': 'Нерис', 'race': 'полуэльф', 'class': 'следопыт',
+                 'inventory': [{'name': 'Штифты', 'quantity': 1}]}
+        action = 'С штифтом возвращаюсь к Ильве. Прошу одолжить её разводной ключ и объясняю ситуацию.'
+        reply = 'Ильва смотрит на купленный штифт и протягивает тебе разводной ключ: — Возвращай.'
+        history = [{'role': 'user', 'content': action}, {'role': 'assistant', 'content': reply}]
+        borrowed = self.m.extract_state(history, state, inline_delta={})
+        self.assertEqual([item['name'] for item in borrowed['inventory']], ['Штифты', 'разводной ключ'])
+        self.assertEqual(self.m.extract_state(history, borrowed, inline_delta={})['inventory'], borrowed['inventory'])
+        structured = self.m.extract_state(history, state, inline_delta={
+            'inventory': [{'name': 'Разводной ключ', 'quantity': 1}], 'resource_events': {'inventory': reply}})
+        self.assertEqual(sum(item['name'].casefold() == 'разводной ключ' for item in structured['inventory']), 1)
+        history[-1]['content'] = 'Если попросишь, Ильва протягивает тебе разводной ключ.'
+        self.assertEqual(self.m.extract_state(history, state, inline_delta={})['inventory'], state['inventory'])
+
+    def test_alpha512_explicit_prose_skill_check_creates_the_card(self):
+        state = {**self.m.DEFAULT_STATE, 'name': 'Нерис', 'race': 'полуэльф', 'class': 'следопыт'}
+        reply = ('Чтобы осмотреть место, проверь **Внимательность, DC 13, модификатор +3**. '
+                 'Если заметишь что-то за ограждением, опишу находку отдельно.')
+        history = [{'role': 'user', 'content': 'Осматриваю ограждение.'},
+                   {'role': 'assistant', 'content': reply}]
+        updated = self.m.extract_state(history, state, inline_delta={})
+        check = updated['pending_check']
+        self.assertEqual((check['kind'], check['dc'], check['expr']), ('check', 13, '1d20+3'))
+        history[-1]['content'] = 'Если решишь осмотреться, проверь Внимательность, DC 13, модификатор +3.'
+        self.assertIsNone(self.m.extract_state(history, state, inline_delta={})['pending_check'])
+
+    def test_alpha512_two_narrated_practice_shots_spend_ammo_only_on_resolution(self):
+        from campaign import roll_result
+        from engine.equipment import ammo_available
+        state = {**self.m.DEFAULT_STATE, 'name': 'Нерис', 'race': 'полуэльф', 'class': 'следопыт',
+                 'scene': {'location': 'Полигон'}, 'stats': {'dex': 17},
+                 'inventory': ['короткий лук', {'name': 'стрелы', 'quantity': 20}]}
+        samples = (
+            ('Стреляю одной стрелой из короткого лука в Левый манекен. Стрелу не подбираю.',
+             'Ты выпускаешь стрелу в Левый манекен у стойки. Брось атаку коротким луком, '
+             'против защиты учебного манекена. Команда: /roll 1d20+5', 10, 8, True),
+            ('Выстрел из короткого лука по правому манекену за ограждением. После выстрела стрелу не подбираю.',
+             'Ты выпускаешь стрелу. Атака коротким луком по Правому манекену за ограждением, '
+             'с помехой из-за укрытия в три четверти: /roll 2d20kl1+5.', 15, 7, False),
+        )
+        history = []
+        for count, (action, announcement, dc, die, success) in zip((20, 19), samples):
+            history.extend([{'role': 'user', 'content': action}, {'role': 'assistant', 'content': announcement}])
+            prepared = self.m.extract_state(history, state, inline_delta={})
+            check = prepared['pending_check']
+            self.assertEqual((check['dc'], check['expr'], check['ammo']), (dc, '1d20+5', 'arrow'))
+            self.assertEqual(ammo_available(prepared, 'arrow'), count)
+            roll = roll_result(check, {'expr': check['expr'], 'check_id': check['id'], 'rolls': [die]})
+            self.assertEqual(roll['success'], success)
+            history.extend([{'role': 'user', 'content': '/roll 1d20+5'},
+                            {'role': 'assistant', 'content': 'Стрела попадает.' if success else 'Промах.'}])
+            state = self.m.extract_state(history, prepared, result=roll, inline_delta={})
+            self.assertEqual(ammo_available(state, 'arrow'), count - 1)
+            self.assertEqual(self.m.extract_state(history, state, result=roll, inline_delta={})['inventory'],
+                             state['inventory'])
+
+    def test_alpha512_installed_pin_is_spent_once_under_its_inventory_name(self):
+        from campaign import roll_result
+        state = {**self.m.DEFAULT_STATE, 'name': 'Нерис', 'race': 'полуэльф', 'class': 'следопыт',
+                 'inventory': [{'name': 'Штифты', 'quantity': 2}, 'разводной ключ']}
+        action = 'Выравниваю гнездо под штифт.'
+        announce = 'Проверь Ловкость рук, DC 10. Команда: /roll 1d20+2. Если удастся, можно будет вставить целый штифт.'
+        history = [{'role': 'user', 'content': action}, {'role': 'assistant', 'content': announce}]
+        prepared = self.m.extract_state(history, state, inline_delta={})
+        check = prepared['pending_check']
+        roll = roll_result(check, {'expr': check['expr'], 'check_id': check['id'], 'rolls': [10]})
+        reply = 'Гнездо выровнено. Стопорный **штифт вставляется в гнездо**. Колокол готов к проверке.'
+        history.extend([{'role': 'user', 'content': '/roll 1d20+2'}, {'role': 'assistant', 'content': reply}])
+        updated = self.m.extract_state(history, prepared, result=roll, inline_delta={
+            'inventory_remove': [{'name': 'стопорный штифт', 'quantity': 1}],
+            'resource_events': {'inventory': reply}})
+        self.assertEqual(updated['inventory'], [{'name': 'Штифты', 'quantity': 1}, 'разводной ключ'])
+        self.assertEqual(self.m.extract_state(history, updated, result=roll, inline_delta={})['inventory'],
+                         updated['inventory'])
+        recap = [{'role': 'user', 'content': 'Вставляю штифт, если ещё не установлен.'},
+                 {'role': 'assistant', 'content': 'Штифт уже установлен в гнезде. Подан сигнал.'}]
+        self.assertEqual(self.m.extract_state(recap, updated, inline_delta={})['inventory'], updated['inventory'])
+
     def test_alpha511_health_recap_only_corrects_hero_hp(self):
         story = ('У гоблина HP: 3/8. У его союзника текущее здоровье: 2/8. '
                  'Текущие HP по листу: **17 из 24**. Текущее здоровье героя: 17/24.')

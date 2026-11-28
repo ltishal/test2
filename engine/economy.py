@@ -6,7 +6,8 @@ from uuid import uuid4
 COINS = {"gold": ("зм", 100), "silver": ("см", 10), "copper": ("мм", 1)}
 LIMIT = 1_000_000
 WORDS = {"одну": 1, "одна": 1, "одной": 1, "один": 1,
-         "две": 2, "два": 2, "три": 3, "четыре": 4, "пять": 5, "десять": 10, "сто": 100}
+         "две": 2, "два": 2, "три": 3, "четыре": 4, "пять": 5,
+         "шесть": 6, "семь": 7, "восемь": 8, "девять": 9, "десять": 10, "сто": 100}
 COUNT = r"(?:[1-9][0-9]{0,5}|" + "|".join(WORDS) + ")"
 COIN_PHRASE = re.compile(
     rf"\b({COUNT})\s+(золот\w*|серебрян\w*|медн\w*|зм|см|мм)\b", re.I
@@ -84,8 +85,15 @@ def trade_evidence(proposal, reply, *, quantity=1):
 
 STOCK = re.compile(rf"\b({COUNT})\s*(?:шт\.?|штук\w*|единиц\w*|порци\w*|предмет\w*|пайк\w*)", re.I)
 EXPLICIT_QUOTE = re.compile(
-    rf"(?:^|[«\"\n]|[:.]\s+)([А-Яа-яЁё0-9][^«»\"\n:.,;—–]{{1,75}}?)\s+"
-    rf"(?:стоит\s+|[—–]\s*(?:по\s+)?)({COUNT})\s+(золот\w*|серебрян\w*|медн\w*|зм|см|мм)\b", re.I
+    rf"(?:^|[«\"\n]|[:.]\s+(?:[—–]\s+)?)([А-Яа-яЁё0-9][^«»\"\n:.,;—–]{{1,75}}?)\s+"
+    rf"(?:(?:ещ[её]\s+)?({COUNT}),\s+стоит\s+|стоит\s+|[—–]\s*(?:по\s+)?)"
+    rf"({COUNT})\s+(золот\w*|серебрян\w*|медн\w*|зм|см|мм)\b"
+    r"(?:\s+за\s+(?:штук\w*|кажд\w*)\b)?", re.I
+)
+DISPLAYED_LIST = re.compile(rf'\bпоказыва(?:я|ет)\s+({COUNT}\b[^.!?;]{{4,130}})[.!?]', re.I)
+DISPLAYED_COUNT = re.compile(
+    rf'(?:^|[,]\s*|\s+и\s+)({COUNT})\s+([а-яё-]+(?:\s+[а-яё-]+){{0,4}}?)'
+    rf'(?=\s+и\s+{COUNT}\b|,|$)', re.I
 )
 
 
@@ -152,6 +160,27 @@ def stated_stock(value):
     return int(count) if count.isdigit() else WORDS[count]
 
 
+def displayed_offer(item, text):
+    shown = [(count, name) for display in DISPLAYED_LIST.finditer(text)
+             for count, name in DISPLAYED_COUNT.findall(display[1]) if mentions_item(item, name)]
+    return shown[0] if len(shown) == 1 else None
+
+
+def offer_stock(item, evidence):
+    """Associate a count with its quoted item even when several are shown together."""
+    clean = proof_text(evidence)
+    quotes = [match for match in EXPLICIT_QUOTE.finditer(clean) if same_item(match[1], item)]
+    counts = [match[2] for match in quotes if match[2]]
+    if len(counts) == 1:
+        count, = counts
+        return int(count) if count.isdigit() else WORDS[count.casefold()]
+    shown = displayed_offer(item, clean)
+    if shown:
+        count, _ = shown
+        return int(count) if count.isdigit() else WORDS[count.casefold()]
+    return stated_stock(clean)
+
+
 def offers_from_story(reply, action=""):
     """Recover explicitly priced items from a sign or a merchant's quote."""
     context = TRADE_CONTEXT.search(reply) or ASK_PRICE.search(action)
@@ -173,8 +202,20 @@ def offers_from_story(reply, action=""):
             if not (re.match(r'^(?:шт\b|штук\w*|единиц\w*)', remainder, re.I)
                     or mentions_item(remainder, name)):
                 stock_match = None
-        stock = stated_stock(stock_match[0]) if stock_match else None
-        evidence = clean[match.start():match.end() + (stock_match.end() if stock_match else 0)].strip(' «»":')
+        stock = stated_stock(stock_match[0]) if stock_match else offer_stock(name, match[0])
+        start = match.start()
+        lookback = max(0, start - 260)
+        displays = list(DISPLAYED_LIST.finditer(clean[lookback:match.end()]))
+        if stock is None and len(displays) == 1:
+            candidate = lookback + displays[0].start()
+            shown = displayed_offer(name, clean[candidate:match.end()])
+            if shown:
+                count, display_name = shown
+                stock = int(count) if count.isdigit() else WORDS[count.casefold()]
+                start = candidate
+                if trade_key(display_name).endswith(" " + trade_key(name)):
+                    name = display_name
+        evidence = clean[start:match.end() + (stock_match.end() if stock_match else 0)].strip(' «»":')
         currency, amount = price[0]
         quotes.append({"item": name, "currency": currency, "price": amount, "stock": 1 if stock is None else stock,
                        "stock_explicit": stock is not None, "evidence": evidence})
@@ -353,9 +394,9 @@ def merge_offers(state, proposed, reply, *, action=""):
             from engine.world import records, life_state
             seller=next((e for e in records(state) if e['id']==seller_id and e.get('kind')=='npc' and life_state(e)=='alive' and trade_key(e.get('location'))==trade_key(location)),None)
             if not seller or trade_key(seller['name']) not in trade_key(quote['evidence']): continue
-        explicit = EXPLICIT_STOCK.search(proof_text(quote['evidence']))
-        stock = stated_stock(quote['evidence']) if explicit else quote.get('stock', 1)
-        if not explicit:
+        evidence_stock = offer_stock(name, quote['evidence'])
+        stock = evidence_stock if evidence_stock is not None else quote.get('stock', 1)
+        if evidence_stock is None:
             corroboration = [extra for extra in inferred if extra['stock_explicit']
                              and extra['price'] == price and extra['currency'] == coin
                              and same_item(extra['item'], name)
@@ -366,9 +407,9 @@ def merge_offers(state, proposed, reply, *, action=""):
                 quote = {**quote, 'evidence': corroboration[0]['evidence'], 'stock_explicit': True}
         if type(stock) is not int or not 0 <= stock <= 99:
             continue
-        if stock == 0 and stated_stock(quote['evidence']) != 0:
+        if stock == 0 and offer_stock(name, quote['evidence']) != 0:
             continue
-        if stock > 1 and stated_stock(quote['evidence']) != stock:
+        if stock > 1 and offer_stock(name, quote['evidence']) != stock:
             continue
         canonical = next((old["item"] for old in offers
                           if trade_key(old.get("location")) == trade_key(location)
@@ -380,7 +421,7 @@ def merge_offers(state, proposed, reply, *, action=""):
             continue
         previous = next((old for old in offers if (trade_key(old.get("location")), item_key(old.get("item")),
                                                    old.get("seller_id")) == identity), None)
-        if previous and not quote.get('stock_explicit') and not re.search(
+        if previous and evidence_stock is None and not quote.get('stock_explicit') and not re.search(
                 r"\b(?:в наличии|есть|остал\w*|поступил\w*|запас)\b", quote['evidence'], re.I):
             stock = previous.get('stock', stock)
         offers = [old for old in offers if (trade_key(old.get("location")), item_key(old.get("item")),old.get("seller_id")) != identity]

@@ -8,6 +8,10 @@ from uuid import uuid4
 ROLL_COMMAND = re.compile(r"/roll\s+((?:\d*)d\d+(?:k[hl]\d+)?(?:[+-]\d+)?)", re.I)
 DICE_PARTS = re.compile(r"(\d*)d(\d+)(?:(k[hl])(\d+))?([+-]\d+)?", re.I)
 DIFFICULTY = re.compile(r"(?:\bDC|КД|КЗ|КБ)\s*[*: ]*(\d+)", re.I)
+SKILL_REQUEST = re.compile(
+    r"\bпроверь(?:те)?\s+([а-яё]+(?:\s+[а-яё]+){0,3}),\s*DC\s+(\d{1,3}),\s*"
+    r"модификатор\s*([+-]\d{1,2})\b", re.I
+)
 KINDS = {"check", "attack", "save", "damage", "heal", "initiative"}
 SCENE_FIELDS = ("id", "location", "time", "participants", "goal", "situation")
 FACT_FIELDS = ("id", "subject", "detail", "source", "holder", "holder_id", "status")
@@ -91,7 +95,20 @@ def pending_check(reply, proposed=None, scene=None, *, defense_dc=None):
         return None
     commands = list(ROLL_COMMAND.finditer(reply))
     if not commands:
-        return None
+        suggested = proposed if isinstance(proposed, dict) else {}
+        if suggested.get("kind") not in (None, "check"):
+            return None
+        clean = re.sub(r"[*_`]", "", reply)
+        requests = list(SKILL_REQUEST.finditer(clean))
+        if len(requests) != 1:
+            return None
+        request, = requests
+        prefix = re.split(r"[.!?;\n]", clean[:request.start()])[-1]
+        if re.search(r"\b(?:если|не надо|не нужно|уже)\b", prefix, re.I):
+            return None
+        skill, dc, modifier = request.groups()
+        return pending_check(f"{request[0]}. /roll 1d20{modifier}",
+                             {**suggested, "kind": "check", "title": suggested.get("title") or skill}, scene)
     formulas = {formula_key(match[1]) for match in commands}
     if None in formulas or len(formulas) != 1:
         return None

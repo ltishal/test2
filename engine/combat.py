@@ -332,7 +332,10 @@ def spend_move(actor, ability, cooldowns, round_number, capacity):
         cooldowns[key(ability["name"])] = round_number + ability["cooldown"] + 1
 
 
-SHOT_INTENT = re.compile(r'\b(?:стреляю|выстреливаю|выпускаю(?:\s+\w+){0,5}\s+(?:стрелу|болт))\b', re.I)
+SHOT_INTENT = re.compile(
+    r'\b(?:стреляю|выстреливаю|выпускаю(?:\s+\w+){0,5}\s+(?:стрелу|болт))\b'
+    r'|^\s*выстрел\s+из\s+[^.!?]{1,55}?\s+(?:по|в)\s+', re.I
+)
 SHOT_EVENT = re.compile(
     r'\b(?:стреляешь|выстреливаешь|промахиваешься|выпускаешь[^.!?]{0,70}\b(?:стрелу|болт))\b'
     r'|\b(?:стрела|болт)\s+(?:летит|попада\w*|угожда\w*|вреза\w*|срыва\w*|пролет\w*|проход\w*)\b', re.I
@@ -386,7 +389,7 @@ def shot_cover(reply, target_name=""):
         if not refers_to_target and (not target_name or key(target_name) not in normalized):
             continue
         quarters = r'(?:три четверти|трех четверт(?:ей|ях|и)|тремя четвертями)'
-        if re.search(rf'{quarters}[^.!?]{{0,30}}\bукрыти|укрыти\w* (?:на )?{quarters}', normalized):
+        if re.search(rf'{quarters}[^.!?]{{0,30}}\bукрыти|укрыти\w* (?:(?:на|в) )?{quarters}', normalized):
             adjustments.append(5)
         elif re.search(r'половинн\w* укрыти|частичн\w* укрыти', clause, re.I):
             adjustments.append(2)
@@ -421,6 +424,13 @@ def narrated_ranged_check(state, weapon, action, reply, proposal):
         matching = [entity for entity in local if reference and reference[1].casefold() in key(entity['name'])]
         targets = matching if len(matching) == 1 else []
     if len(targets) != 1:
+        practice = re.search(r'\b(?:в|по)\s+(?:\w+\s+){0,2}(манекен|мишен)\w*\b', action, re.I)
+        if practice and re.search(r'\bатак\w*\b', reply, re.I):
+            announced = {'kind': 'attack', 'title': 'Выстрел по учебной цели', 'target': proposed.get('target')}
+            check = pending_check(reply, announced, scene)
+            if not check:
+                check = pending_check(reply, announced, scene, defense_dc=10 + shot_cover(reply, practice[1]))
+            return bind_ranged_weapon(state, check, weapon)
         return None
     target, = targets
     spec = profile(target)

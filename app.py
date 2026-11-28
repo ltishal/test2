@@ -32,7 +32,7 @@ from campaign import (
     initial_identity, normalize_abilities, normalize_ability, pending_check, roll_result, rules_result,
     sheet_identity, campaign_minute, clock_label, update_agenda, wait_plan,
     advance_clock, synchronize_clock, close_overdue_events, record_npc_actions,
-    CANCEL_CHECK_COMMAND, CANCEL_CHECK_REPLY, check_instructions_in_card,
+    CANCEL_CHECK_COMMAND, CANCEL_CHECK_REPLY, ROLL_COMMAND, check_instructions_in_card,
 )
 
 from engine.clock import advance_action
@@ -58,7 +58,7 @@ from party_store import PartyConflict, PartyMissing, PartyStore
 from token_usage import TokenUsage, state_turn_id
 
 BASE_DIR = Path(__file__).resolve().parent
-APP_REVISION = "2026-11-27.world-alpha5.1.1"
+APP_REVISION = "2026-11-27.world-alpha5.1.2"
 QWEN_SUMMARY_LIMIT = 480
 QWEN_STATE_LIMIT = 1100
 QWEN_STATE_SETUP_LIMIT = 2200
@@ -1232,6 +1232,50 @@ def receives_sealed_letter(action, latest):
     )
 
 
+def narrated_loan(action, reply):
+    request = re.search(r"\bодолжи(?:ть|те)?\b[^.!?;\n]{0,115}", action, re.I)
+    if not request:
+        return ""
+    prefix = re.split(r"[.!?;\n]", action[:request.start()])[-1]
+    if re.search(r"\bне\b", prefix, re.I):
+        return ""
+    clean = re.sub(r"[*_`]", "", reply)
+    offered = list(re.finditer(
+        r"\b(?:протягивает|переда[её]т|да[её]т)\s+тебе\s+"
+        r"([а-яё-]+(?:\s+[а-яё-]+){0,3})(?=[.,:;!?]|$)", clean, re.I
+    ))
+    if len(offered) != 1:
+        return ""
+    match, = offered
+    clause = re.split(r"[.!?;\n]", clean[:match.start()])[-1]
+    if re.search(r"\b(?:если|может|не|готов\w*)\b", clause, re.I) or re.search(
+            r"\b(?:ты\s+)?не\s+(?:бер[её]шь|принимаешь)\b", clean[match.end():match.end() + 90], re.I):
+        return ""
+    name = match[1]
+    return name if re.search(r"\b" + re.escape(name) + r"\b", request[0], re.I) else ""
+
+
+PIN = re.compile(r"\bштифт(?:а|ы|ов|у|ом)?\b", re.I)
+PIN_INSTALLED = re.compile(
+    r"\b(?:ты\s+(?:вставляешь|устанавливаешь)\s+(?:\w+\s+){0,2}штифт|"
+    r"штифт\s+вставляется)\s+в\s+гнездо\b", re.I
+)
+
+
+def installed_pin(items, action, reply):
+    if not PIN.search(action) or not re.search(r'\b(?:вставляю|вставить|устанавливаю|установить)\b', action, re.I):
+        return None
+    clean = re.sub(r"[*_`]", "", reply)
+    match = PIN_INSTALLED.search(clean)
+    if not match:
+        return None
+    clause = re.split(r"[.!?;\n]", clean[:match.start()])[-1]
+    if re.search(r"\b(?:если|не|уже)\b", clause, re.I):
+        return None
+    pins = [item for item in items if PIN.search(_item_name(item))]
+    return pins[0] if len(pins) == 1 else None
+
+
 def _transfer_items(items, transfers, latest, *, letter_transfer=None):
     owners = []
     applied = set()
@@ -1886,7 +1930,7 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
     new_state["facts"] = merge_facts(new_state["facts"], fact_updates)
     owned_ammo = resolved_ammo or (shot_weapon or {}).get("ammo")
     ammo_log = []
-    if resolved_ammo or (shot_weapon and not next_check and SHOT_EVENT.search(latest)
+    if resolved_ammo or (shot_weapon and not next_check and not ROLL_COMMAND.search(latest) and SHOT_EVENT.search(latest)
                          and not re.search(r"\bне\s+(?:стреляешь|выпускаешь|выстреливаешь)\b", latest, re.I)):
         ammo_log.append(consume_ammo(current, owned_ammo))
     if owned_ammo:
@@ -1980,13 +2024,28 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
                     new_state.pop(field, None)
     inventory = current.get("inventory")
     if isinstance(inventory, list):
-        current["inventory"] = _remove_inventory_items(inventory, new_state.get("inventory_remove"))
+        removals = new_state.get("inventory_remove")
+        removals = removals if isinstance(removals, list) else []
+        installation = history[-1].get("content", "") if resolved_previous and result.get("success") and history else action
+        pin = installed_pin(inventory, installation, latest) if not new_character else None
+        if pin:
+            pin_id = pin.get("id") if isinstance(pin, dict) else None
+            removals = [item for item in removals if not isinstance(item, dict) or not (
+                PIN.search(_item_name(item)) or pin_id and item.get("id") == pin_id)]
+            removals.append({"name": _item_name(pin), "id": pin_id, "quantity": 1})
+            if isinstance(new_state.get("inventory"), list):
+                new_state["inventory"] = [item for item in new_state["inventory"] if not PIN.search(_item_name(item))]
+        current["inventory"] = _remove_inventory_items(inventory, removals)
         proposed_items = new_state.get("inventory")
         proposed_items = proposed_items if isinstance(proposed_items, list) else []
         if not new_character and receives_sealed_letter(action, latest) and not any(
                 SEALED_LETTER.search(_item_name(item))
                 for item in [*current["inventory"], *proposed_items]):
             current["inventory"].extend(_inventory_with_ids(["Запечатанное письмо"]))
+        loan = narrated_loan(action, latest) if not new_character else ""
+        if loan and not any(_item_name(item) == _item_name(loan)
+                            for item in [*current["inventory"], *proposed_items]):
+            current["inventory"].extend(_inventory_with_ids([loan]))
     merged = dict(current)
     merged["pending_check"] = next_check
     for k, v in new_state.items():
@@ -2163,10 +2222,8 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
         if rules_result(current, result): blocked.add("hero")
         if npc_outcome:
             blocked.add(npc_outcome["id"])
-        elif resolved_ammo and resolved_check.get("world_target_id"):
-            blocked.add(resolved_check["world_target_id"])
-        elif ranged_check:
-            blocked.add(ranged_check["world_target_id"])
+        elif ranged_target:
+            blocked.add(ranged_target)
         effect_proposals = effect_proposals if isinstance(effect_proposals, list) else []
         if protected_target:
             names = set(entity_names(protected_target))
