@@ -43,7 +43,7 @@ from engine.constructor import (CONSTRUCTOR_PROMPT, TYPES, apply_blueprints, app
                                 attach_item_blueprints, attach_learned_spell, constructor_context,
                                 learn_blueprint, learned_spell_from_story, recipes)
 from engine.turn_protocol import DeltaStream, PROTOCOL_PROMPT, validate_delta
-from engine.world import (WORLD_PROMPT, world_context, merge_entities, npc_damage,
+from engine.world import (NPC_CONTINUITY_PROMPT, WORLD_PROMPT, world_context, merge_entities, npc_damage,
                           bind_damage_target, apply_npc_damage, combat_ready, sync_life, restore_scene_people,
                           entity_names, entry_roles, is_present, key as world_key, life_state)
 
@@ -58,7 +58,7 @@ from party_store import PartyConflict, PartyMissing, PartyStore
 from token_usage import TokenUsage, state_turn_id
 
 BASE_DIR = Path(__file__).resolve().parent
-APP_REVISION = "2026-11-27.world-alpha5.1.2"
+APP_REVISION = "2026-11-28.world-alpha5.1.3"
 QWEN_SUMMARY_LIMIT = 480
 QWEN_STATE_LIMIT = 1100
 QWEN_STATE_SETUP_LIMIT = 2200
@@ -1684,7 +1684,7 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
     new_character = (current.get("character_setup_pending")
                      or not (current.get("race") and current.get("class")))
     state_limit = QWEN_STATE_SETUP_LIMIT if new_character or next_upgrade_level is not None else QWEN_STATE_LIMIT
-    state_messages = [{"role": "system", "content": STATE_EXTRACT_PROMPT + WORLD_PROMPT + EFFECT_PROMPT
+    state_messages = [{"role": "system", "content": STATE_EXTRACT_PROMPT + NPC_CONTINUITY_PROMPT + WORLD_PROMPT + EFFECT_PROMPT
                        + COMBAT_PROMPT + TRADE_PROMPT + CONSTRUCTOR_PROMPT},
                       {"role": "user", "content": prompt}]
     if inline_delta is not None and not new_character:
@@ -1783,7 +1783,8 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
     for field in ("constructor", "casting_stat", "character_blueprints"):
         new_state.pop(field, None)
     world_patches = new_state.pop("world_entities", None)
-    entities = merge_entities({**current, "scene": campaign_scene}, world_patches, latest)
+    entities = merge_entities({**current, "scene": campaign_scene}, world_patches, latest,
+                              previous_scene=current.get("scene"))
     restore_scene_people(entities, campaign_scene, latest, current.get("scene"),
                          new_state.get("name") if new_character else current.get("name"))
     npc_outcome = npc_damage(current, result)
@@ -2782,6 +2783,7 @@ def api_chat():
         "content": (state_note + json.dumps(state_context, ensure_ascii=False) + length_note),
     }] + messages[1:]
     inline_enabled = bool(party and not setup_turn and next_upgrade_level is None and INLINE_STATE_ENABLED)
+    messages[0]["content"] += NPC_CONTINUITY_PROMPT
     if inline_enabled:
         messages[0]["content"] += ("\n\n" + PROTOCOL_PROMPT + STATE_EXTRACT_PROMPT + WORLD_PROMPT
                                      + EFFECT_PROMPT + COMBAT_PROMPT + TRADE_PROMPT + CONSTRUCTOR_PROMPT)

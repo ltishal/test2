@@ -544,6 +544,55 @@ class InlineIntegrationTest(unittest.TestCase):
         self.assertEqual(self.m._safe_name('../..'), '')
         self.assertLessEqual(len(self.m._safe_name('я' * 300).encode()), 128)
 
+    def test_alpha513_escort_keeps_npc_location_when_name_is_claimed_elsewhere(self):
+        hero = {**self.m.DEFAULT_STATE, 'name': 'Путник', 'race': 'человек', 'class': 'следопыт'}
+        old, outside, inn, mill = 'Ниша водосброса', 'Переулок за трактиром', 'Таверна', 'Лаз у мельницы'
+        thomas = {'id': 'original', 'kind': 'npc', 'name': 'Томас', 'location': old,
+                  'hp': 6, 'max_hp': 8, 'aliases': ['Подросток из водосброса']}
+        state = {**hero, 'scene': {'location': old}, 'world_entities': [thomas]}
+        moves = (
+            (outside, 'Вы возвращаетесь через водосброс. Томас держится рядом и молча слушает.'),
+            (inn, 'Вы с Томасом направляетесь в таверну. Внутри пахнет прелым элем. Томас обнимает сестру.'),
+            (mill, 'Томас остаётся рядом с сестрой. Ты добираешься до лаза у мельницы.'),
+        )
+        for location, story in moves:
+            state = self.m.extract_state([{'role': 'user', 'content': 'Иду дальше.'},
+                                          {'role': 'assistant', 'content': story}], state,
+                                         inline_delta={'scene': {'location': location}})
+        saved, = state['world_entities']
+        self.assertEqual((saved['id'], saved['location'], saved['hp'], saved['aliases']),
+                         ('original', inn, 6, thomas['aliases']))
+
+        evidence = 'Подросток не поднимает нож.'
+        story = evidence + '\n\n— Томас, — отвечает он. Его слова пока ничем не подтверждены.'
+        for identity in ({'id': 'original'}, {'new_entity': True}, {}):
+            with self.subTest(identity=identity):
+                updated = self.m.extract_state([{'role': 'user', 'content': 'Кто ты?'},
+                                                 {'role': 'assistant', 'content': story}], state,
+                                                inline_delta={'world_entities': [{
+                                                    'kind': 'npc', 'name': 'Томас', 'location': mill,
+                                                    'evidence': evidence, **identity}]})
+                self.assertEqual(updated['world_entities'], state['world_entities'])
+        real_homonym = 'Другой человек по имени Томас подходит к мельнице. Это мельник из соседней деревни.'
+        introduced = self.m.extract_state([{'role': 'user', 'content': 'Кто там?'},
+                                           {'role': 'assistant', 'content': real_homonym}], state,
+                                          inline_delta={'world_entities': [{
+                                              'kind': 'npc', 'name': 'Томас', 'location': mill,
+                                              'evidence': real_homonym, 'new_entity': True}]})
+        self.assertEqual(len({npc['id'] for npc in introduced['world_entities']}), 2)
+
+    def test_alpha513_witnessed_reunion_reaches_model_in_crowded_scene(self):
+        reunion = {'id': 'npc-action:reunion', 'kind': 'npc_action', 'subject': 'Томас',
+                   'detail': 'Увидев брата, она бросается к нему; Томас обнимает её.',
+                   'status': 'confirmed', 'location': 'Таверна'}
+        noise = [{'id': 'npc-action:mill-' + str(i), 'kind': 'npc_action', 'subject': 'Мельник',
+                  'status': 'confirmed', 'detail': 'Мельник осматривает мельницу и боковой лаз.'}
+                 for i in range(35)]
+        context = self.m.facts_context([reunion, {**reunion, 'id': 'same-witness'}] + noise,
+                                       'Осматриваю боковой лаз у мельницы.')
+        self.assertEqual(sum(fact['detail'] == reunion['detail'] for fact in context), 1)
+        self.assertLessEqual(len(context), 12)
+
     def test_alpha512_mechanic_and_homonymous_npcs_are_recorded_on_opening(self):
         state = {**self.m.DEFAULT_STATE, 'name': 'Нерис', 'race': 'полуэльф', 'class': 'следопыт',
                  'scene': {'location': 'Двор станции'}}

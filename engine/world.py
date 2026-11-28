@@ -29,6 +29,22 @@ def entity_names(entity):
     return [entity['name'], *(alias for alias in aliases if isinstance(alias, str))] if isinstance(aliases, list) else [entity['name']]
 
 
+def name_forms(name):
+    normalized = key(name)
+    if not normalized or not all(word.isalpha() or '-' in word for word in normalized.split()):
+        return ''
+    forms = []
+    for word in normalized.split():
+        if word.endswith(('а', 'я')):
+            variants = (word, word[:-1] + ('ой' if word.endswith('а') else 'ей'))
+        elif word.endswith(('ь', 'й')):
+            variants = (word, word[:-1] + 'ем')
+        else:
+            variants = (word, word + 'ом', word + 'ем')
+        forms.append('(?:' + '|'.join(map(re.escape, variants)) + ')')
+    return r'\b' + r'\s+'.join(forms) + r'\b'
+
+
 DEAD_STATES = {'dead','destroyed','мертв','мертва','мертвый','мертвая','погиб','погибла','погибший','погибшая','убит','убита','убитый','убитая','уничтожен','уничтожена','уничтоженный'}
 DOWN_STATES = {'defeated','unconscious','побежден','побеждена','без сознания','побежден (0 hp)'}
 
@@ -99,15 +115,42 @@ def infer_introduction(entities, reply, scene):
         if score >= 2:
             candidates.append((score, entity))
     candidates.sort(key=lambda value: value[0], reverse=True)
-    if candidates and (len(candidates) == 1 or candidates[0][0] > candidates[1][0]):
+    if (candidates and (len(candidates) == 1 or candidates[0][0] > candidates[1][0])
+            and not remote_name_claim(entities, intro[1], local, reply)):
         add_known_name(candidates[0][1], intro[1], entities)
 
 
-def merge_entities(state, proposals, reply):
+UNVERIFIED_NAME = re.compile(
+    r'\b(?:назвал(?:ся|ась)|называ(?:ет|ют) себя|представил(?:ся|ась))\b|'
+    r'\b(?:личность|слова|имя)\b[^.!?\n]{0,55}\bне подтвержд', re.I
+)
+
+
+def unverified_npc_name(name, reply):
+    if not key(name) or not UNVERIFIED_NAME.search(reply):
+        return False
+    clean = re.sub(r'[*_`]', '', reply).casefold().replace('ё', 'е')
+    return bool(re.search(r'(?:^|\n)\s*[—–]\s*(?:я\s+)?' + re.escape(key(name)) + r'\s*[,!.—–]|'
+                          r'\b(?:назвал(?:ся|ась)|называет себя|представил(?:ся|ась))\s+'
+                          + (name_forms(name) or r'(?!)'), clean))
+
+
+def remote_name_claim(entities, name, location, reply):
+    return location and unverified_npc_name(name, reply) and any(
+        entry.get('kind') == 'npc' and key(entry.get('location')) not in ('', location)
+        and any(key(alias) == key(name) for alias in entity_names(entry)) for entry in entities
+    )
+
+
+def merge_entities(state, proposals, reply, *, previous_scene=None):
     """Apply small evidence-grounded patches; identity and combat HP belong to the server."""
     result = deepcopy(records(state))
     by_id = {e['id']: e for e in result}
     infer_introduction(result, reply, state.get('scene'))
+    if previous_scene is not None:
+        move_scene_companions(result, previous_scene, state.get('scene'), reply)
+    scene = state.get('scene')
+    scene_location = scene.get('location') if isinstance(scene, dict) else None
     for patch in proposals[:12] if isinstance(proposals, list) else []:
         if not isinstance(patch,dict): continue
         evidence = text(patch.get('evidence'),600)
@@ -115,6 +158,11 @@ def merge_entities(state, proposals, reply):
         entity_id = text(patch.get('id'),80)
         name = text(patch.get('name'),160)
         kind = patch.get('kind')
+        location = key(patch.get('location') or scene_location)
+        if kind == 'npc' or by_id.get(entity_id, {}).get('kind') == 'npc':
+            claimed_name = text(patch.get('known_name'), 100) or name or by_id.get(entity_id, {}).get('name')
+            if remote_name_claim(result, claimed_name, location, reply):
+                continue
         if entity_id:
             entity = by_id.get(entity_id)
             if entity is None: continue
@@ -144,6 +192,13 @@ def merge_entities(state, proposals, reply):
                 entity = {'id':uuid4().hex,'name':name,'kind':kind}
                 result.append(entity)
                 by_id[entity['id']]=entity
+        if (entity.get('kind') == 'npc' and entity.get('arrival_evidence')
+                and key(patch.get('location')) not in ('', key(entity.get('location')))
+                and not re.search(r'\b(?:приш[её]л|пришла|прибыл[аи]?|вернул(?:ся|ась)|'
+                                  r'переехал[аи]?|вош[её]л|вошла|уш[её]л|ушла|'
+                                  r'сопровождает|выводишь|приводишь|добралась|добрался)\b', evidence, re.I)):
+            # A mention or a speech attributed to a familiar NPC does not move that NPC.
+            patch = {k: v for k, v in patch.items() if k != 'location'}
         # Life-state is sticky; a model cannot resurrect by changing prose.
         if entity.get('kind') in ('npc','creature'):
             prior = life_state(entity)
@@ -223,6 +278,44 @@ GOBLIN_NAMES = {'повозка': 'Гоблин у повозки', 'ветви'
                 'лес': 'Гоблин у леса'}
 
 
+def move_scene_companions(entities, previous_scene, scene, reply):
+    """Persist accompaniment only when the narration confirms arrival in the new scene."""
+    old = previous_scene.get('location') if isinstance(previous_scene, dict) else None
+    new = scene.get('location') if isinstance(scene, dict) else None
+    if not old or not new or key(new) == key(old):
+        return
+    clean = re.sub(r'[*_`]', '', reply).replace('ё', 'е')
+    clauses = re.split(r'[.!?\n]+', clean)
+    arrived = any(re.search(r'\b(?:прибываете|добираетесь|возвращаетесь|заходите|входите|'
+                            r'выбираетесь|оказываетесь|пришли|добрались|вернулись)\b|^\s*внутри\b', clause, re.I)
+                  and not re.search(r'\b(?:если|возможно|не)\b', clause, re.I) for clause in clauses)
+    if not arrived:
+        return
+    participants = previous_scene.get('participants')
+    participants = {key(name) for name in participants} if isinstance(participants, list) else set()
+    people = {}
+    for npc in entities:
+        if npc.get('kind') == 'npc':
+            people.setdefault(key(npc['name']), []).append(npc)
+    for identity, namesakes in people.items():
+        local = [entry for entry in namesakes if key(entry.get('location')) == key(old)]
+        source = local or (namesakes if identity in participants else [])
+        if len(source) != 1 or not is_present(source[0]):
+            continue
+        npc, = source
+        name = name_forms(npc['name'])
+        if not name:
+            continue
+        journey = (rf'\bвы с\s+{name}\s+(?:возвращаетесь|прибываете|добираетесь|заходите|входите|'
+                   rf'направляетесь|выходите|пришли|добрались|вернулись)\b|'
+                   rf'{name}\s+(?:держится рядом|ид[её]т рядом|сопровождает тебя)\b')
+        evidence = next((clause.strip() for clause in clauses if re.search(journey, clause, re.I)
+                         and not re.search(r'\b(?:если|возможно|останется|остается)\b', clause, re.I)), None)
+        if evidence:
+            npc['location'] = new
+            npc['arrival_evidence'] = evidence[:180]
+
+
 def encounter_position(value):
     if not re.search(r'\bгоблин', value, re.I):
         return None
@@ -260,6 +353,8 @@ def restore_scene_people(entities, scene, reply, previous_scene=None, hero_name=
                  and any(key(name) == key(alias) for alias in entity_names(entry))
                  and key(entry.get('location')) in ('', key(location))]
         if any(role in entry_roles(entry) for entry in local):
+            continue
+        if remote_name_claim(entities, name, key(location), reply):
             continue
         if len(local) == 1 and (len(name.split()) > 1 or not entry_roles(local[0])):
             local[0].setdefault('location', location)
@@ -379,7 +474,7 @@ def world_context(state, query, limit=12, *, player_query=None):
         names = [key(alias) for alias in entity_names(e)]
         return (any(mentions(alias, explicit) for alias in names), bool(set(names) & people),
                 any(mentions(alias, source) for alias in names for source in related),
-                e['id'] in affected, local, len(overlap))
+                e['id'] in affected, local, bool(e.get('arrival_evidence')), len(overlap))
     ranked = sorted(reversed(records(state)),key=score,reverse=True)
     budget = 3500
     selected = []
@@ -387,7 +482,8 @@ def world_context(state, query, limit=12, *, player_query=None):
         if len(selected) >= limit:
             break
         entry = {k: text(e.get(k), n) for k,n in {'id':80,'name':160,'kind':30,'description':260,
-                 'location':180,'role':40,'traits':160,'status':120,'threat':30,'form':120,'environment':160,'access':24}.items() if isinstance(e.get(k),str)}
+                 'location':180,'role':40,'traits':160,'status':120,'threat':30,'form':120,'environment':160,
+                 'access':24,'arrival_evidence':180}.items() if isinstance(e.get(k),str)}
         if isinstance(e.get('aliases'), list):
             entry['aliases'] = entity_names(e)[1:5]
         entry.update({k:e[k] for k in ('hp','max_hp','mana','max_mana','attitude') if type(e.get(k)) is int})
@@ -433,6 +529,17 @@ def apply_npc_damage(entities, outcome):
             e['hp']=outcome['hp_after']
             if e['hp']==0: e['status']='побеждён (0 HP)'; e['life_state']='defeated'
     return entities
+
+
+NPC_CONTINUITY_PROMPT = (
+    "\nПеред сценой сверь уже знакомых NPC, их последнее подтверждённое место "
+    "и засвидетельствованные встречи в facts. Если персонаж был оставлен на месте, "
+    "не переноси его вслед за игроком без нового события. При совместном прибытии "
+    "обнови место существующей записи по ID. Совпадение имени или заявление о родстве — "
+    "показание, пока личность явно не подтверждена. Не превращай забытое прошлое или "
+    "противоречие в двойника, подмену либо новый квест о личности без ранее заложенной причины. "
+    "Показания о прошлом не отменяют уже сыгранную встречу или завершённый квест.\n"
+)
 
 
 WORLD_PROMPT = '''

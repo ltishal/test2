@@ -366,7 +366,20 @@ def facts_context(facts, query):
         return len(matches)
 
     ranked = sorted(entries, key=relevance, reverse=True)
-    actions = [entry for entry in ranked if entry.get("kind") == "npc_action"][:4]
+    reunions = []
+    seen_reunions = set()
+    for entry in ranked:
+        detail = _text(entry.get("detail"), 340)
+        if (entry.get("kind") == "npc_action" and entry.get("status") == "confirmed"
+                and detail not in seen_reunions
+                and re.search(r"\bувидев\s+(?:своего|свою)?\s*(?:брата|сестру)\b", detail, re.I)
+                and re.search(r"\b(?:обнима|прижима|бросается к)\w*", detail, re.I)):
+            reunions.append(entry)
+            seen_reunions.add(detail)
+            if len(reunions) == 2:
+                break
+    actions = reunions + [entry for entry in ranked if entry.get("kind") == "npc_action"
+                          and _text(entry.get("detail"), 340) not in seen_reunions][:4 - len(reunions)]
     return actions + [entry for entry in ranked if entry not in actions][:12 - len(actions)]
 
 
