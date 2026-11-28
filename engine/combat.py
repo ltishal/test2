@@ -9,7 +9,7 @@ from engine.clock import advance_action
 from engine.equipment import equipped, item_spec, require_ammo, consume_ammo, WEAPONS, ARMOR
 from engine.world import combat_ready, encounter_position, entity_names, key, records, text, is_present, life_state
 
-ELEMENTS = {"physical", "fire", "cold", "lightning", "poison", "arcane", "radiant", "shadow"}
+ELEMENTS = {"physical", "fire", "cold", "lightning", "thunder", "poison", "arcane", "radiant", "shadow"}
 STYLE = {"balanced", "aggressive", "defensive", "caster"}
 PROFILES = {
     "minor": (10, 2, "1d4", 4),
@@ -19,7 +19,7 @@ PROFILES = {
     "legendary": (18, 9, "2d8+4", 24),
 }
 ELEMENT_LABEL = {"physical": "физический", "fire": "огонь", "cold": "холод",
-                 "lightning": "молния", "poison": "яд", "arcane": "магия",
+                 "lightning": "молния", "thunder": "гром", "poison": "яд", "arcane": "магия",
                  "radiant": "свет", "shadow": "тьма"}
 BUILTIN_ABILITIES = {
     "огненный снаряд": {"dice": "1d10", "element": "fire", "cost": 0, "cooldown": 0},
@@ -51,6 +51,8 @@ def safe_ability(data, *, power=1):
             "cooldown": bounded_int(data.get("cooldown"), 0, 8, 0),
             "hits": bounded_int(data.get("hits"), 1, 4, 1),
             "automatic": data.get("automatic") is True}
+    if data.get("stat") in ("int", "wis", "cha"):
+        ability["stat"] = data["stat"]
 
     # Cap burst and require resources/cooldown for damage above a tier budget.
     power = bounded_int(power, 1, 20, 1)
@@ -573,7 +575,8 @@ def combat_turn(original, command, argument, roller=None):
                 state["ability_cooldowns"] = ready_cooldowns
             if move.get("ammo"):
                 log.append(consume_ammo(state, move["ammo"]))
-            stat = state.get("casting_stat", "int") if command == "/cast" else move.get("stat", "str")
+            stat = (move.get("stat", state.get("casting_stat", "int")) if command == "/cast"
+                    else move.get("stat", "str"))
             enemy = profiles[target["id"]]
             log.append(strike(state, target, move, 2 + hero_stat(state, stat) + check_bonus(state, stat),
                               enemy["defense"] + (2 if target["id"] in guards else 0),

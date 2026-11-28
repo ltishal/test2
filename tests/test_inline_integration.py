@@ -217,6 +217,124 @@ class InlineIntegrationTest(unittest.TestCase):
         self.assertCountEqual([(e['id'], e['role'], e['location']) for e in saved['state']['world_entities']],
                               [(e['id'], e['role'], e['location']) for e in world.values()])
 
+    def test_live_miron_replies_keep_two_records_across_scenes(self):
+        workshop, gates = 'Мастерская Кедровой Гавани', 'Ворота Кедровой Гавани'
+        opening = ('У ворот тебя останавливает страж по имени Мирон — синий плащ застёгнут у горла.\n'
+                   'В Мастерской Кедровой Гавани другой Мирон — оружейник в потемневшем кожаном фартуке.')
+        exchanges = [
+            (workshop, opening),
+            (workshop, 'В мастерской Мирон-оружейник сверяет отметку с записью о линзе, которую приняла Нора.'),
+            (gates, 'У ворот Мирон-страж отвечает, что ночью видел незнакомца у северной дороги.'),
+            (gates, 'У караульного поста стоит Мирон — тот самый страж, который проверял твои бумаги.'),
+        ]
+        original = None
+        for revision, (location, story) in enumerate(exchanges):
+            self.data.update(revision=revision, request_id=uuid4().hex)
+            self.stream(story + START + json.dumps({'scene': {'location': location}}, ensure_ascii=False) + END)
+            saved = self.commit()
+            people = saved['state']['world_entities']
+            self.assertCountEqual([(npc['name'], npc['role'], npc['location']) for npc in people],
+                                  [('Мирон', 'страж', gates), ('Мирон', 'оружейник', workshop)])
+            ids = {npc['role']: npc['id'] for npc in people}
+            self.assertNotEqual(ids['страж'], ids['оружейник'])
+            if original is None:
+                original = ids
+            self.assertEqual(ids, original)
+        self.assertEqual(saved, self.m.PARTIES.get(self.owner, self.party))
+
+    def test_live_weapon_handoff_without_quotes_saves_validated_project(self):
+        story = ('Мирон снимает Кедровый клинок с верстака и вкладывает его тебе в ладонь. '
+                 'Рукоять гладкая, тёплая от мастерской.\n\n'
+                 'Правила клинка подтверждены: простое лёгкое оружие ближнего боя; '
+                 'при атаке использует Ловкость и наносит 1d6 физического урона. '
+                 'Цена — 0: Мирон вручает его как подарок.')
+        self.stream(story + START + '{}' + END)
+        with patch.object(self.m, '_measured_completion', side_effect=AssertionError('Unexpected extraction')):
+            self.commit()
+        state = self.m.PARTIES.get(self.owner, self.party)['state']
+        project, = state['constructor']
+        item, = state['inventory']
+        self.assertEqual(item['recipe_id'], project['id'])
+        self.assertEqual(item['mechanics'], {'slot': 'weapon', 'dice': '1d6', 'element': 'physical', 'stat': 'dex'})
+        self.assertIn('"dice": "1d6"', self.m._engine_command(state, '/design Кедровый клинок', None)[1])
+        equipped, _ = self.m._engine_command(state, '/equip Кедровый клинок', None)
+        self.assertEqual(equipped['weapon_in_hand'], 'Кедровый клинок')
+        before = self.m.DEFAULT_STATE | {'name': 'Вера', 'race': 'человек', 'class': 'следопыт'}
+        hypothetical = 'Если Мирон снимает Кедровый клинок с верстака и вкладывает его тебе в ладонь. ' + story.split('\n\n')[1]
+        result = self.m.extract_state([{'role': 'assistant', 'content': hypothetical}], before, inline_delta={})
+        self.assertEqual(result['inventory'], [])
+        self.assertEqual(result['constructor'], [])
+
+    def test_live_lesson_saves_thunder_spell_and_uses_wisdom_in_combat(self):
+        story = ('Ты выполняешь упражнение. Мирон кивает и подтверждает, что приём освоен.\n\n'
+                 '— Точные правила: «Отзвук цапли» — магическая атака действием по одной цели. '
+                 'Проверка атаки использует Мудрость; при попадании цель получает 1d6 громового урона. '
+                 'Стоимость — 1 мана.\n\nМирон не просит повторять упражнение: приём изучен, но ману ты не тратила.')
+        self.stream(story + START + '{}' + END)
+        self.commit()
+        state = self.m.PARTIES.get(self.owner, self.party)['state']
+        ability, = state['abilities']
+        project, = state['constructor']
+        self.assertEqual(ability['recipe_id'], project['id'])
+        self.assertEqual({key: ability['mechanics'][key] for key in ('dice', 'stat', 'element', 'cost')},
+                         {'dice': '1d6', 'stat': 'wis', 'element': 'thunder', 'cost': 1})
+        self.assertIn('Отзвук цапли', self.m._engine_command(state, '/design Отзвук цапли', None)[1])
+        with self.assertRaisesRegex(ValueError, 'уже знает'):
+            self.m._engine_command(state, '/learn Отзвук цапли', None)
+        state.update(stats={'int': 10, 'wis': 16}, mana=6, max_mana=6, scene={'location': 'Двор'},
+                     world_entities=[{'id': 'ash', 'name': 'Ясень', 'kind': 'creature', 'location': 'Двор',
+                                      'hp': 8, 'max_hp': 8, 'threat': 'minor'}])
+        rolls = iter((20, 2, 7, 4, 1))
+        fought, reply = self.m.combat_turn(state, '/cast', 'Отзвук цапли | Ясень', roller=lambda *_: next(rolls))
+        self.assertIn('7+5', reply)
+        self.assertIn('4, гром', reply)
+        self.assertEqual((fought['mana'], fought['world_entities'][0]['hp']), (5, 4))
+        unfinished = story.replace('приём освоен', 'приём не освоен').replace('приём изучен', 'приём не изучен')
+        self.assertEqual(self.m.learned_spell_from_story(unfinished, 'Вера'), [])
+
+    def test_state_extraction_retries_lighthouse_and_preserves_unsaved_draft(self):
+        quest = {'id': 'lens', 'name': 'Линза маяка', 'giver': 'Мирон-оружейник',
+                 'location': 'Мастерская Кедровой Гавани', 'status': 'active',
+                 'stages': [{'text': 'Передать линзу Норе', 'done': False},
+                            {'text': 'Предъявить отметку оружейнику', 'done': False}],
+                 'rewards': {'gold': 7, 'xp': 40}}
+        self.party = uuid4().hex
+        self.m.PARTIES.create(self.owner, self.party, self.m.DEFAULT_STATE | {
+            'name': 'Вера', 'race': 'человек', 'class': 'следопыт', 'gold': 2, 'quests': [quest],
+        }, [])
+        self.data.update(party_id=self.party, action={'content': 'Передаю линзу Норе на маяке.'})
+        story = ('Нора принимает линзу и вручает тебе отметку с белой цаплей. '
+                 'Осталось предъявить отметку оружейнику в мастерской.')
+        self.stream(story)
+
+        def response(content, finish='stop'):
+            return types.SimpleNamespace(choices=[types.SimpleNamespace(
+                finish_reason=finish, message=types.SimpleNamespace(content=content))])
+
+        with patch.object(self.m, '_measured_completion',
+                          side_effect=[response('', 'length'), response('неполная сверка')]):
+            with self.assertRaises(self.m.StateUnavailable):
+                self.commit()
+        draft = self.m.PARTIES.get(self.owner, self.party)
+        self.assertEqual((draft['revision'], draft['messages'], draft['state']['gold']), (0, [], 2))
+        self.assertIsNotNone(draft['draft'])
+        delta = {'quests': [{**quest, 'stages': [{**quest['stages'][0], 'done': True}, quest['stages'][1]]}],
+                 'inventory': [{'name': 'Отметка с белой цаплей', 'quantity': 1}],
+                 'resource_events': {'inventory': 'Нора принимает линзу и вручает тебе отметку с белой цаплей.'}}
+        with patch.object(self.m, '_measured_completion', side_effect=[
+            response('', 'length'), response(json.dumps(delta, ensure_ascii=False)),
+        ]) as extract:
+            saved = self.commit()
+            self.assertEqual(saved, self.commit())
+        self.assertGreater(extract.call_args_list[1].kwargs['max_tokens'], extract.call_args_list[0].kwargs['max_tokens'])
+        self.assertIn('один полный компактный JSON', extract.call_args.kwargs['messages'][-1]['content'])
+        state = saved['state']
+        self.assertEqual((saved['revision'], state['gold'], state['xp']), (1, 2, 0))
+        self.assertEqual(state['inventory'][0]['name'], 'Отметка с белой цаплей')
+        self.assertEqual([stage['done'] for stage in state['quests'][0]['stages']], [True, False])
+        context = self.m._quest_context([{**quest, 'status': 'completed'}], [])
+        self.assertEqual((context[0]['giver'], context[0]['location']), (quest['giver'], quest['location']))
+
     def test_unicode_metadata_is_hidden_and_committed(self):
         story = 'Лина возвращается в таверну.'
         wire = story + '⟦STATE_DELTA⟧{"scene":{"location":"Таверна"}}⟦/STATE_DELTA⟧'

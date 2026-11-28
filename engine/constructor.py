@@ -17,7 +17,7 @@ LEARNED_SPELL = re.compile(
 NUMBER_WORDS = {'одна': 1, 'одну': 1, 'один': 1, 'две': 2, 'два': 2, 'три': 3,
                 'четыре': 4, 'пять': 5, 'шесть': 6, 'семь': 7, 'восемь': 8}
 NUMBER_TEXT = r'(?:[0-9]{1,2}|' + '|'.join(NUMBER_WORDS) + ')'
-ELEMENT_NAMES = {'огн': 'fire', 'холод': 'cold', 'молни': 'lightning', 'ядом': 'poison',
+ELEMENT_NAMES = {'огн': 'fire', 'холод': 'cold', 'молни': 'lightning', 'гром': 'thunder', 'ядом': 'poison',
                  'магией': 'arcane', 'светом': 'radiant', 'тьмой': 'shadow', 'физическ': 'physical'}
 
 
@@ -173,13 +173,21 @@ ITEM_RECEIPT = re.compile(
     r'\b(?:вручает|переда[её]т|протягивает|отда[её]т) (?:тебе|вам)\s+'
     r'[«"]([^»"\n]{3,100})[»"]|\b(?:ты получаешь|вы получаете)\s+[«"]([^»"\n]{3,100})[»"]', re.I
 )
+NAMED_WEAPON = r'[А-ЯЁ][а-яё-]{2,30}(?: [а-яё-]{2,24}){0,2} (?i:клинок|меч|кинжал|лук|арбалет|топор)'
+WEAPON_HANDOFF = re.compile(
+    rf'\b(?:(?i:вручает|переда[её]т|протягивает|отда[её]т) (?i:тебе|вам)\s+({NAMED_WEAPON})\b'
+    rf'|(?i:снимает|бер[её]т|поднимает)\s+({NAMED_WEAPON})\b[^.!?]{{0,100}}\b'
+    r'(?i:и вкладывает (?:его |е[её] )?(?:тебе|вам) в (?:ладонь|руку))\b)'
+)
 
 
 def equipment_receipts(reply):
     for sentence in re.split(r'[.!?;\n]+', re.sub(r'[*_`]', '', reply)):
-        if re.search(r'\b(?:если|не|уже|может|готов\w*|позже)\b', sentence, re.I):
+        if re.search(r'\b(?:если|не|уже|может|мог\w*\s+бы|готов\w*|позже)\b', sentence, re.I):
             continue
         for match in ITEM_RECEIPT.finditer(sentence):
+            yield match[1] or match[2], sentence.strip()
+        for match in WEAPON_HANDOFF.finditer(sentence):
             yield match[1] or match[2], sentence.strip()
 
 
@@ -210,6 +218,8 @@ def attach_item_blueprints(state, reply=''):
 
 WEAPON_DICE = re.compile(r'\b(\d{1,2}d\d{1,2}(?:[+-]\d{1,2})?)\s+физическ\w*\s+урон', re.I)
 WEAPON_STAT = re.compile(r'\b(ловкост\w*|сил[ауыой])\b', re.I)
+WEAPON_RULES = re.compile(r'\bправила (?:клинка|оружия|меча|кинжала|лука|арбалета|топора) '
+                          r'подтверждены\s*:([^.!?\n]{1,220})', re.I)
 
 
 def equipment_blueprints(world_patches, inventory, reply):
@@ -233,11 +243,15 @@ def equipment_blueprints(world_patches, inventory, reply):
         if len(owned) == 1:
             yield {'kind': 'item', 'name': owned[0]['name'], 'mechanics': owned[0]['mechanics'], 'evidence': evidence}
             continue
-        dice = WEAPON_DICE.search(evidence)
-        stat = WEAPON_STAT.search(evidence)
-        if dice and stat:
-            mechanics = {'slot': 'weapon', 'dice': dice[1].lower(), 'element': 'physical',
-                         'stat': 'dex' if stat[1].casefold().startswith('ловкост') else 'str'}
+        rules = evidence
+        if len(receipts) == 1 and (offset := reply.find(evidence)) >= 0:
+            following = reply[offset + len(evidence):offset + len(evidence) + 350]
+            if separate_rules := WEAPON_RULES.search(following):
+                rules += ' ' + separate_rules[1]
+        dice = {match.casefold() for match in WEAPON_DICE.findall(rules)}
+        stats = {'dex' if value.casefold().startswith('ловкост') else 'str' for value in WEAPON_STAT.findall(rules)}
+        if len(dice) == 1 and len(stats) == 1:
+            mechanics = {'slot': 'weapon', 'dice': dice.pop(), 'element': 'physical', 'stat': stats.pop()}
             if equipment_spec(mechanics):
                 yield {'kind': 'item', 'name': name, 'mechanics': mechanics, 'evidence': evidence}
 
@@ -268,8 +282,13 @@ def narrated_spell_mechanics(value):
         value = value.casefold()
         return int(value) if value.isdigit() else NUMBER_WORDS[value]
 
-    return {'dice': dice, 'element': element, 'cost': parse_count(costs[0]),
-            'cooldown': parse_count(cooldown[1]) if cooldown else 0}
+    mechanics = {'dice': dice, 'element': element, 'cost': parse_count(costs[0]),
+                 'cooldown': parse_count(cooldown[1]) if cooldown else 0}
+    stats = {stat for stem, stat in (('интеллект', 'int'), ('мудрост', 'wis'), ('харизм', 'cha'))
+             if re.search(rf'\b{stem}\w*\b', clean, re.I)}
+    if len(stats) == 1:
+        mechanics['stat'] = stats.pop()
+    return mechanics
 
 
 def learned_spell_from_story(reply, hero_name=None):
@@ -294,11 +313,15 @@ def learned_spell_from_story(reply, hero_name=None):
 
     # An instructor may dictate the formula first, then confirm a single taught spell.
     evidence = reply[-600:].strip()
-    if not re.search(r'\bурок\s+заверш[её]н\b|\bзаклинание\s+изучено\b', evidence, re.I):
+    if not re.search(r'\b(?:урок\s+заверш[её]н|заклинание\s+изучено|при[её]м\s+(?:изучен|освоен))\b',
+                     evidence, re.I):
         return []
-    if re.search(r'\b(?:не изучен\w*|не выучен\w*|не заверш[её]н\w*|если (?:ты|урок))\b', evidence, re.I):
+    if re.search(r'\b(?:не изучен\w*|не выучен\w*|не освоен\w*|не заверш[её]н\w*|если (?:ты|урок|при[её]м))\b', evidence, re.I):
         return []
     named = re.findall(r'\b(?:теперь\s+)?ты\s+знаешь\s+[«“"]([^»”"\n]{3,100})[»”"]', evidence, re.I)
+    if not named and re.search(r'\b(?:ты\s+выполняешь\s+упражнение|подтверждает,\s+что\s+при[её]м\s+освоен)\b',
+                               evidence, re.I):
+        named = re.findall(r'\b(?:точные\s+)?правила\s*:\s*[«“"]([^»”"\n]{3,100})[»”"]', evidence, re.I)
     if len(set(named)) != 1:
         return []
     mechanics = narrated_spell_mechanics(evidence)
@@ -335,5 +358,5 @@ def constructor_context(state, query):
 
 
 CONSTRUCTOR_PROMPT = """
-КОНСТРУКТОР. Для новых проектов, созданных или изучаемых в этой сцене, верни blueprints:[{kind,name,description,mechanics,evidence}]. evidence — дословная фраза с полным названием. kind item: mechanics оружия {slot:weapon,dice,element,stat} или брони {slot:armor,defense,dex_cap}; для обычного предмета опусти mechanics. kind spell/ability: mechanics {dice,element,cost,cooldown,hits,automatic}; числа проверяет сервер. kind race/class: mechanics {bonuses:{str/dex/con/int/wis/cha:1..2},trait}; для class также hp_die (6/8/10/12) и casting_stat (int/wis/cha). При создании героя с авторской расой или классом указывай характеристики до бонусов конструктора. Проект хранится отдельно: заклинание можно изучить через /learn, предмет можно получить в истории и экипировать. Для нового оружия укажи механику в blueprints. Если герой действительно получил предмет, назови полное имя в фразе о вручении и верни его в inventory с resource_events.inventory. Один чертёж без подтверждённой передачи предмет не выдаёт. Используй сохранённые проекты из constructor; не переопределяй уже утверждённые правила.
+КОНСТРУКТОР. Для новых проектов, созданных или изучаемых в этой сцене, верни blueprints:[{kind,name,description,mechanics,evidence}]. evidence — дословная фраза с полным названием. kind item: mechanics оружия {slot:weapon,dice,element,stat} или брони {slot:armor,defense,dex_cap}; для обычного предмета опусти mechanics. kind spell/ability: mechanics {dice,element,cost,cooldown,hits,automatic}; если правила явно задают характеристику атаки заклинанием, допиши stat (int/wis/cha). Числа проверяет сервер. kind race/class: mechanics {bonuses:{str/dex/con/int/wis/cha:1..2},trait}; для class также hp_die (6/8/10/12) и casting_stat (int/wis/cha). При создании героя с авторской расой или классом указывай характеристики до бонусов конструктора. Проект хранится отдельно: заклинание можно изучить через /learn, предмет можно получить в истории и экипировать. Для нового оружия укажи механику в blueprints. Если герой действительно получил предмет, назови полное имя в фразе о вручении и верни его в inventory с resource_events.inventory. Один чертёж без подтверждённой передачи предмет не выдаёт. Используй сохранённые проекты из constructor; не переопределяй уже утверждённые правила.
 """

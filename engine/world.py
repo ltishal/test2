@@ -279,13 +279,13 @@ NPC_ROLES = {
     'смотритель': 'смотритель', 'смотрительница': 'смотрительница', 'оружейник': 'оружейник',
 }
 ROLE_WORD = r"(?i:" + '|'.join(NPC_ROLES) + r")"
-ROLE_NAME = re.compile(rf"\b({ROLE_WORD})(?:-{ROLE_WORD})?\s+({PERSON_NAME})\b")
+ROLE_NAME = re.compile(rf"\b({ROLE_WORD})(?:-{ROLE_WORD})?\s+(?:(?i:по имени)\s+)?({PERSON_NAME})\b")
 PERSON_ACTION = re.compile(
     rf"\b({PERSON_NAME})\s+(?i:удерживает поводья|держит поводья|правит повозкой)\b"
 )
 ROLE_NAME_REVERSED = re.compile(
     rf"\b({PERSON_NAME})\s*(?:,\s*|[—–]\s*)(?:(?i:портовый)\s+)?"
-    rf"(?:(?i:дворф)-)?({ROLE_WORD})\b"
+    rf"(?:(?i:тот самый|та самая)\s+)?(?:(?i:дворф)-)?({ROLE_WORD})\b"
 )
 NPC_OTHER_ROLE = re.compile(
     rf'\b(?i:другим) ({PERSON_NAME})\s*[—–]\s*(?i:оружейником)\b'
@@ -390,7 +390,7 @@ def local_npcs_by_title(entities, name, location):
 
 # Match explicit places in a sighting clause. Keep broader scene labels when they agree.
 SIGHTING_PLACES = {
-    'ворота': (r'(?:у|возле|около) ворот\b', 'Ворота'),
+    'ворота': (r'(?:у|возле|около) (?:ворот|караульного поста)\b', 'Ворота'),
     'мастерская': (r'в мастерской\b|(?:у|за) (?:верстаком|наковальней)\b', 'Мастерская'),
 }
 
@@ -407,8 +407,10 @@ def sighting_location(clause, scene_location, known_locations=()):
             continue
         if re.search(r'\b(?:если|возможно|говорит|сказал|якобы|не)\b', prefix, re.I):
             continue
-        suffix = re.match(r'(?: [А-ЯЁ][а-яё-]+){1,3}\b', clause[matched.end():])
-        if suffix:
+        remainder = clause[matched.end():]
+        suffix = re.match(r'(?: [А-ЯЁ][а-яё-]+){1,3}\b', remainder)
+        if suffix and not (NPC_NAME_TITLE.match(remainder.lstrip()) or ROLE_NAME_REVERSED.match(remainder.lstrip())
+                           or ROLE_NAME.match(remainder.lstrip())):
             return label + suffix[0]
         for known in (scene_location, *known_locations):
             if key(known).startswith(stem):

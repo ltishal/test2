@@ -58,7 +58,7 @@ from party_store import PartyConflict, PartyMissing, PartyStore
 from token_usage import TokenUsage, state_turn_id
 
 BASE_DIR = Path(__file__).resolve().parent
-APP_REVISION = "2026-11-28.world-alpha5.1.9"
+APP_REVISION = "2026-11-28.world-alpha5.1.10"
 QWEN_SUMMARY_LIMIT = 480
 QWEN_STATE_LIMIT = 1100
 QWEN_STATE_SETUP_LIMIT = 2200
@@ -1017,6 +1017,9 @@ def _quest_context(quests, awarded):
             continue
         stages = quest.get("stages")
         entry = {"name": quest["name"][:100], "status": status}
+        for field in ("giver", "location"):
+            if isinstance(quest.get(field), str) and quest[field].strip():
+                entry[field] = quest[field][:120]
         rewards = quest.get("rewards")
         if isinstance(rewards, dict):
             entry["rewards"] = {key: value for key, value in rewards.items()
@@ -1706,6 +1709,9 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
     new_character = (current.get("character_setup_pending")
                      or not (current.get("race") and current.get("class")))
     state_limit = QWEN_STATE_SETUP_LIMIT if new_character or next_upgrade_level is not None else QWEN_STATE_LIMIT
+    qwen_state = _is_yandex_qwen(EXTRACT_MODEL)
+    # Reasoning providers may count internal tokens against the same completion limit.
+    state_limits = (state_limit, min(4400, state_limit * 2)) if qwen_state else (3200, 6400)
     state_messages = [{"role": "system", "content": STATE_EXTRACT_PROMPT + NPC_CONTINUITY_PROMPT + WORLD_PROMPT + EFFECT_PROMPT
                        + COMBAT_PROMPT + TRADE_PROMPT + CONSTRUCTOR_PROMPT},
                       {"role": "user", "content": prompt}]
@@ -1714,14 +1720,24 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
         if new_state is None:
             raise StateUnavailable("Некорректный встроенный блок состояния.")
     else:
-        for attempt, limit in enumerate((state_limit, min(4400, state_limit * 2)), start=1):
+        for attempt, limit in enumerate(state_limits, start=1):
             state_options = _qwen_service_options(EXTRACT_MODEL, limit) or {"max_tokens": limit}
+            request_messages = state_messages
+            if attempt == 2:
+                request_messages = [state_messages[0], {
+                    "role": "user", "content": prompt + (
+                        "\nПредыдущая сверка не вернула читаемый объект. Начни прямо с { и заверши }. "
+                        "Верни один полный компактный JSON без Markdown и объяснений. "
+                        "Для передачи предмета обнови инвентарь, цепочку владельцев и только выполненные этапы. "
+                        "Если видимый ответ не подтверждает событие, опусти его."
+                    ),
+                }]
             try:
                 with llm_slot() as ok:
                     if not ok:
                         raise RuntimeError("нет свободного слота модели")
                     resp = _measured_completion(turn_id, "state", model=EXTRACT_MODEL,
-                                                messages=state_messages, temperature=0.1, **state_options)
+                                                messages=request_messages, temperature=0.1, **state_options)
                 state_choice = resp.choices[0]
                 if getattr(state_choice, "finish_reason", None) == "length":
                     raise ValueError("обновление листа обрезано по лимиту")
