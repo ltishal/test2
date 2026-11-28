@@ -158,19 +158,29 @@ def merge_entities(state, proposals, reply, *, previous_scene=None):
         entity_id = text(patch.get('id'),80)
         name = text(patch.get('name'),160)
         kind = patch.get('kind')
+        if kind == 'npc' or by_id.get(entity_id, {}).get('kind') == 'npc':
+            location_evidence = sighting_location(evidence, scene_location, (patch.get('location'),))
+            if location_evidence:
+                patch = {**patch, 'location': location_evidence}
         location = key(patch.get('location') or scene_location)
         role_matches = []
+        proposed_role = None
         if kind == 'npc' or by_id.get(entity_id, {}).get('kind') == 'npc':
             claimed_name = text(patch.get('known_name'), 100) or name or by_id.get(entity_id, {}).get('name')
             if remote_name_claim(result, claimed_name, location, reply):
                 continue
-            role_matches = local_npcs_by_title(result, name, location)
+            title, bare_name = npc_title_and_name(name)
+            proposed_role = title or NPC_ROLES.get(key(patch.get('role')))
+            reference = f'{proposed_role} {bare_name}' if proposed_role and bare_name else name
+            role_matches = local_npcs_by_title(result, reference, location)
         if entity_id:
             entity = by_id.get(entity_id)
             if entity is None: continue
             # An ID cannot be used to change the identity of another entity.
             matches_name = not name or any(key(name) == key(alias) for alias in entity_names(entity))
             if (not matches_name and entity not in role_matches) or (kind and kind != entity.get('kind')):
+                continue
+            if proposed_role and entity.get('role') and proposed_role not in entry_roles(entity):
                 continue
         else:
             if not name or not isinstance(kind,str) or kind not in KINDS: continue
@@ -231,6 +241,9 @@ def merge_entities(state, proposals, reply, *, previous_scene=None):
             from engine.equipment import equipment_spec
             spec=equipment_spec(patch.get('mechanics'))
             if spec: entity['mechanics']=spec
+        if entity.get('kind') == 'npc' and not entity.get('role'):
+            if proposed_role:
+                entity['role'] = proposed_role
         sync_life(entity)
         entity['evidence']=evidence
         name_revealed = text(patch.get('known_name'), 100)
@@ -263,7 +276,7 @@ NPC_ROLES = {
     'стражник': 'страж', 'сторож': 'сторож', 'наниматель': 'наниматель',
     'спутник': 'спутник', 'проводник': 'проводник', 'дворф': 'дворф', 'возница': 'возница',
     'архивист': 'архивист', 'архивистка': 'архивист', 'механик': 'механик',
-    'смотритель': 'смотритель', 'смотрительница': 'смотрительница',
+    'смотритель': 'смотритель', 'смотрительница': 'смотрительница', 'оружейник': 'оружейник',
 }
 ROLE_WORD = r"(?i:" + '|'.join(NPC_ROLES) + r")"
 ROLE_NAME = re.compile(rf"\b({ROLE_WORD})(?:-{ROLE_WORD})?\s+({PERSON_NAME})\b")
@@ -274,6 +287,10 @@ ROLE_NAME_REVERSED = re.compile(
     rf"\b({PERSON_NAME})\s*(?:,\s*|[—–]\s*)(?:(?i:портовый)\s+)?"
     rf"(?:(?i:дворф)-)?({ROLE_WORD})\b"
 )
+NPC_OTHER_ROLE = re.compile(
+    rf'\b(?i:другим) ({PERSON_NAME})\s*[—–]\s*(?i:оружейником)\b'
+)
+NPC_NAME_TITLE = re.compile(rf'\b({PERSON_NAME})-({ROLE_WORD})\b')
 NPC_DELIVERY = re.compile(
     rf'(?:^|(?<=[.!?])\s+)((?:На|В|У) [а-яё-]+(?: [а-яё-]+){{0,5}}) '
     rf'({PERSON_NAME}) (?i:(?:оказывается на месте и )?принимает (?:письмо|посылку|доставку))\b'
@@ -341,18 +358,18 @@ def encounter_position(value):
 
 
 def entry_roles(entry):
-    fields = ' '.join(str(entry.get(field, '')) for field in ('traits', 'description', 'role'))
+    fields = str(entry.get('role') or '') or ' '.join(str(entry.get(field, '')) for field in ('traits', 'description'))
     return {NPC_ROLES[role.casefold()] for role in re.findall(rf'\b{ROLE_WORD}\b', fields)}
 
 
 def npc_title_and_name(value):
     name = key(value)
     prefix = re.fullmatch(rf'({ROLE_WORD}) (.+)', name)
-    suffix = re.fullmatch(rf'(.+) \(({ROLE_WORD})\)', name)
+    suffix = re.fullmatch(rf'(.+?)(?: \(({ROLE_WORD})\)|-({ROLE_WORD}))', name)
     if prefix:
         return NPC_ROLES[prefix[1]], prefix[2]
     if suffix:
-        return NPC_ROLES[suffix[2]], suffix[1]
+        return NPC_ROLES[suffix[2] or suffix[3]], suffix[1]
     return None, name
 
 
@@ -371,6 +388,40 @@ def local_npcs_by_title(entities, name, location):
     return matches
 
 
+# Match explicit places in a sighting clause. Keep broader scene labels when they agree.
+SIGHTING_PLACES = {
+    'ворота': (r'(?:у|возле|около) ворот\b', 'Ворота'),
+    'мастерская': (r'в мастерской\b|(?:у|за) (?:верстаком|наковальней)\b', 'Мастерская'),
+}
+
+
+def sighting_location(clause, scene_location, known_locations=()):
+    for stem, (pattern, label) in SIGHTING_PLACES.items():
+        matched = re.search(r'\b' + pattern, clause, re.I)
+        if not matched:
+            continue
+        prefix = clause[:matched.start()].strip()
+        if prefix and not re.search(
+                r'\b(?:стоит|дежурит|оста[её]тся|работает|встреча\w*|видишь|занят\w*)\b'
+                r'[^,;]{0,36}$', prefix, re.I):
+            continue
+        if re.search(r'\b(?:если|возможно|говорит|сказал|якобы|не)\b', prefix, re.I):
+            continue
+        suffix = re.match(r'(?: [А-ЯЁ][а-яё-]+){1,3}\b', clause[matched.end():])
+        if suffix:
+            return label + suffix[0]
+        for known in (scene_location, *known_locations):
+            if key(known).startswith(stem):
+                return known
+        # A named compound such as «Мастерская Кедровой Гавани» gives the shared site.
+        site = re.fullmatch(r'(?:Мастерская|Ворота)((?: [А-ЯЁ][а-яё-]+){1,3})', scene_location or '')
+        if site:
+            return label + site[1]
+        if not scene_location:
+            return label
+    return None
+
+
 def restore_scene_people(entities, scene, reply, previous_scene=None, hero_name=None):
     """Recover named people and clearly enumerated opponents omitted from a delta."""
     location = (scene.get('location') or '') if isinstance(scene, dict) else ''
@@ -378,31 +429,64 @@ def restore_scene_people(entities, scene, reply, previous_scene=None, hero_name=
             r'\b(?:оба|обе|они)\b[^.]{0,50}\bоста[лются]+\w*\s+позади', reply, re.I):
         location = previous_scene['location']
     clean = re.sub(r'[*_`]', '', reply)
-    found = [(m[1], m[2]) for m in ROLE_NAME.finditer(clean)]
-    found.extend((m[2], m[1]) for m in ROLE_NAME_REVERSED.finditer(clean))
-    found.extend(('возница', m[1]) for m in PERSON_ACTION.finditer(clean)
+    found = []
+    for clause in re.split(r'[.!?;\n]+', clean):
+        place = sighting_location(clause, location)
+        for pattern, role_index, name_index in (
+                (ROLE_NAME, 1, 2), (ROLE_NAME_REVERSED, 2, 1), (NPC_NAME_TITLE, 2, 1)):
+            found.extend((m[role_index], m[name_index], place, clause) for m in pattern.finditer(clause))
+        for match in NPC_OTHER_ROLE.finditer(clause):
+            names = {name for _, name, _, _ in found if re.fullmatch(name_forms(name) or '(?!)', key(match[1]))}
+            if len(names) == 1:
+                found.append(('оружейник', names.pop(), place, clause))
+    found.extend(('возница', m[1], None, m[0]) for m in PERSON_ACTION.finditer(clean)
                  if len(m[1].split()) == 2 and not any(
                      entry.get('kind') == 'npc'
                      and any(key(alias) == key(m[1]) for alias in entity_names(entry))
                      for entry in entities))
-    for role, name in found:
+    for role, name, place, clause in found:
         if key(name) == key(hero_name):
             continue
         role = NPC_ROLES[role.casefold()]
-        local = [entry for entry in entities if entry.get('kind') == 'npc'
-                 and any(key(name) == key(alias) for alias in entity_names(entry))
-                 and (not location or key(entry.get('location')) in ('', key(location)))]
-        if any(role in entry_roles(entry) for entry in local):
+        _, bare = npc_title_and_name(name)
+        if bare != key(name):
+            name = name[:len(bare)]
+        destination = place or location
+        named = [entry for entry in entities if entry.get('kind') == 'npc'
+                 and any(npc_title_and_name(alias)[1] == key(name) for alias in entity_names(entry))]
+        local = [entry for entry in named
+                 if not destination or key(entry.get('location')) in ('', key(destination))]
+        if remote_name_claim(entities, name, key(destination), reply):
             continue
-        if remote_name_claim(entities, name, key(location), reply):
+        same_role = [entry for entry in named if role in entry_roles(entry)
+                     or any(npc_title_and_name(alias)[0] == role for alias in entity_names(entry))]
+        matching = [entry for entry in same_role if entry in local]
+        if matching:
+            if place and len(matching) == 1 and not matching[0].get('location'):
+                matching[0]['location'] = place
             continue
+        # Repair a previous fallback assignment when a direct encounter identifies a unique role.
+        direct = re.search(r'\b(?:встреча\w*|видишь|стоит|дежурит|на посту)\b', clause, re.I)
+        if place and direct and len(same_role) == 1:
+            entry = same_role[0]
+            old_location = key(entry.get('location'))
+            colocated_namesake = any(other not in same_role and key(other.get('location')) == old_location
+                                      for other in named)
+            saved_place = sighting_location(entry.get('evidence') or '', entry.get('location'))
+            if colocated_namesake and not entry.get('arrival_evidence') and not saved_place:
+                entry.update(location=place, evidence=clause.strip())
+                continue
         if len(local) == 1 and (len(name.split()) > 1 or not entry_roles(local[0])):
-            local[0].setdefault('location', location)
+            if destination and not local[0].get('location'):
+                local[0]['location'] = destination
             if role != 'дворф' or not local[0].get('role'):
                 local[0]['role'] = role
             continue
-        entities.append({'id': uuid4().hex, 'kind': 'npc', 'name': name, 'location': location,
-                         'description': role.capitalize() + '.', 'role': role, 'life_state': 'alive'})
+        entry = {'id': uuid4().hex, 'kind': 'npc', 'name': name, 'location': destination,
+                 'description': role.capitalize() + '.', 'role': role, 'life_state': 'alive'}
+        if place:
+            entry['evidence'] = clause.strip()
+        entities.append(entry)
 
     for meeting in NPC_DELIVERY.finditer(clean):
         destination, name = meeting.groups()
@@ -601,5 +685,5 @@ NPC_CONTINUITY_PROMPT = (
 
 
 WORLD_PROMPT = '''
-ДИНАМИЧЕСКИЙ МИР. Не ограничивай фантазию каталогом. Вноси в энциклопедию каждого названного NPC, которого герой действительно встретил, включая нанимателя и получателя доставки в промежуточной сцене. Укажи место самой встречи. Для новых значимых существ, NPC, предметов, локаций, фракций и способностей верни world_entities: [{kind,name,description,location,traits,status,evidence}]. kind: npc, creature, item, location, faction, ability или other. Для боевого существа можешь при создании или при вступлении ранее мирного NPC в бой указать threat: minor, normal, dangerous, elite, legendary (относительная сила в мире, не подстраивай под героя). HP вычисляет сервер в пределах диапазона силы, не возвращай hp/max_hp. Для разных одноимённых объектов передавай new_entity:true только при первом появлении, для обновления обязательно ID; одноимённые NPC могут иметь одинаковое имя. Для предмета с экипировкой передай mechanics:{slot:weapon,dice,element,stat} или {slot:armor,defense,dex_cap}. Для обновления существующей записи используй точный id из world_entities контекста, не меняй имя и вид напрямую. Если NPC назвал своё имя, обнови прежний id и укажи known_name, подтверждённое фразой evidence; не создавай дубль. Для локации указывай access: open, closed или restricted по фактическому доступу, отдельно от факта обнаружения. evidence — дословная фраза нового видимого повествования, не фантазия игрока и не пересказ. Не сохраняй неподтверждённые догадки как события. Не воскрешай побеждённых существ без особого сюжетного разрешения. Для новой проверки урона по зарегистрированному существу добавь в pending_check точный world_target_id и target (имя этого существа). Если существо впервые создаётся этим же ходом, вместо ID передай world_target: true и точное имя target. npc_rule_effect — уже вычисленный итог броска по существу, не пересчитывай его. Не объявляй окончательное убийство до разрешения броска. Новые необычные свойства допустимы как сюжетные факты, но не создают автоматическую игровую механику сами по себе.
+ДИНАМИЧЕСКИЙ МИР. Не ограничивай фантазию каталогом. Вноси в энциклопедию каждого названного NPC, которого герой действительно встретил, включая нанимателя и получателя доставки в промежуточной сцене. Если герой за ход посетил несколько мест, укажи место каждой встречи и процитируй фразу с ним. Для NPC с одинаковым именем сохраняй их роль и не заменяй место встречи итоговой локацией героя. Для новых значимых существ, NPC, предметов, локаций, фракций и способностей верни world_entities: [{kind,name,description,location,traits,status,evidence}]. kind: npc, creature, item, location, faction, ability или other. Для боевого существа можешь при создании или при вступлении ранее мирного NPC в бой указать threat: minor, normal, dangerous, elite, legendary (относительная сила в мире, не подстраивай под героя). HP вычисляет сервер в пределах диапазона силы, не возвращай hp/max_hp. Для разных одноимённых объектов передавай new_entity:true только при первом появлении, для обновления обязательно ID; одноимённые NPC могут иметь одинаковое имя. Для предмета с экипировкой передай mechanics:{slot:weapon,dice,element,stat} или {slot:armor,defense,dex_cap}. Для обновления существующей записи используй точный id из world_entities контекста, не меняй имя и вид напрямую. Если NPC назвал своё имя, обнови прежний id и укажи known_name, подтверждённое фразой evidence; не создавай дубль. Для локации указывай access: open, closed или restricted по фактическому доступу, отдельно от факта обнаружения. evidence — дословная фраза нового видимого повествования, не фантазия игрока и не пересказ. Не сохраняй неподтверждённые догадки как события. Не воскрешай побеждённых существ без особого сюжетного разрешения. Для новой проверки урона по зарегистрированному существу добавь в pending_check точный world_target_id и target (имя этого существа). Если существо впервые создаётся этим же ходом, вместо ID передай world_target: true и точное имя target. npc_rule_effect — уже вычисленный итог броска по существу, не пересчитывай его. Не объявляй окончательное убийство до разрешения броска. Новые необычные свойства допустимы как сюжетные факты, но не создают автоматическую игровую механику сами по себе.
 '''

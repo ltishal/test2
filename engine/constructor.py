@@ -4,7 +4,7 @@ import re
 from uuid import uuid4
 
 from engine.combat import bounded_int, safe_ability
-from engine.equipment import equipment_spec
+from engine.equipment import equipment_spec, item_spec
 from engine.world import key, text
 
 TYPES = {'item': 'Предмет', 'race': 'Раса', 'class': 'Класс',
@@ -30,9 +30,19 @@ def recipe_matches(state, reference):
 
 def names_match(left, right):
     a, b = key(left).split(), key(right).split()
-    return bool(a and b and a[1:] == b[1:] and (a[0] == b[0] or
-                (len(a[0]) >= 4 and len(b[0]) >= 4 and a[0][-1] in 'аяую'
-                 and b[0][-1] in 'аяую' and a[0][:-1] == b[0][:-1])))
+    return bool(a and b and len(a) == len(b) and all(
+        first == second
+        or (len(first) >= 4 and len(second) >= 4 and first[-1] in 'аяую'
+            and second[-1] in 'аяую' and first[:-1] == second[:-1])
+        or (re.sub(r'(?<=\w{4})(?:ый|ий|ого|его|ому|ему|ым|им|ом|ем)$', '', first)
+            == re.sub(r'(?<=\w{4})(?:ый|ий|ого|его|ому|ему|ым|им|ом|ем)$', '', second))
+        or (min(len(first), len(second)) >= 4
+            and (first == second + 'а' or second == first + 'а'))
+        or (min(len(first), len(second)) >= 5 and
+            (first.endswith('ок') and first[:-2] + 'ка' == second
+             or second.endswith('ок') and second[:-2] + 'ка' == first))
+        for first, second in zip(a, b)
+    ))
 
 
 def recipes(state):
@@ -94,11 +104,15 @@ def apply_blueprints(state, proposals, reply):
             recipe = validate_blueprint(proposal, level)
             quoted = re.findall(r'[«“"]([^«“»”"\n]{3,100})[»”"]', evidence)
             normalized = " ".join(evidence.casefold().replace("ё", "е").split())
-            if key(recipe['name']) not in normalized and not any(names_match(recipe['name'], name) for name in quoted):
+            if not re.search(r'(?<!\w)' + re.escape(key(recipe['name'])) + r'(?!\w)', normalized) and not any(
+                    names_match(recipe['name'], name) for name in quoted):
                 raise ValueError('Название проекта отсутствует в подтверждённой фразе.')
             existing = next((entry for entry in catalog if entry['kind'] == recipe['kind']
                              and names_match(entry['name'], recipe['name'])), None)
             if existing:
+                if recipe['kind'] == 'item' and recipe['mechanics'] and not existing.get('mechanics'):
+                    existing['mechanics'] = recipe['mechanics']
+                    reports.append(f"Правила проекта записаны: {existing['name']}.")
                 continue
             if len(catalog) >= RECIPE_LIMIT:
                 raise ValueError('Список проектов этой партии заполнен.')
@@ -155,20 +169,87 @@ def learn_blueprint(state, reference):
     return f"Изучено: {recipe['name']}."
 
 
-def attach_item_blueprints(state):
-    item_recipes = {key(row['name']): row for row in recipes(state) if row['kind'] == 'item'}
+ITEM_RECEIPT = re.compile(
+    r'\b(?:вручает|переда[её]т|протягивает|отда[её]т) (?:тебе|вам)\s+'
+    r'[«"]([^»"\n]{3,100})[»"]|\b(?:ты получаешь|вы получаете)\s+[«"]([^»"\n]{3,100})[»"]', re.I
+)
+
+
+def equipment_receipts(reply):
+    for sentence in re.split(r'[.!?;\n]+', re.sub(r'[*_`]', '', reply)):
+        if re.search(r'\b(?:если|не|уже|может|готов\w*|позже)\b', sentence, re.I):
+            continue
+        for match in ITEM_RECEIPT.finditer(sentence):
+            yield match[1] or match[2], sentence.strip()
+
+
+def attach_item_blueprints(state, reply=''):
+    item_recipes = [row for row in recipes(state) if row['kind'] == 'item' and row.get('mechanics')]
     inventory = state.get('inventory')
     if not isinstance(inventory, list) or not item_recipes:
         return
     changed = []
     for item in inventory:
         entry = item if isinstance(item, dict) else {'name': item}
-        recipe = item_recipes.get(key(entry.get('name')))
-        if recipe and recipe.get('mechanics') and (not entry.get('recipe_id') or entry.get('recipe_id') == recipe['id']):
+        matches = [row for row in item_recipes if names_match(row['name'], entry.get('name'))]
+        if len(matches) == 1 and entry.get('recipe_id') in (None, matches[0]['id']):
+            recipe = matches[0]
             changed.append({**entry, 'recipe_id': recipe['id'], 'mechanics': recipe['mechanics']})
         else:
             changed.append(item)
+    for name, _ in equipment_receipts(reply):
+        matches = [row for row in item_recipes if names_match(row['name'], name)]
+        if len(matches) != 1 or any(names_match(name, item.get('name') if isinstance(item, dict) else item)
+                                    for item in changed):
+            continue
+        recipe = matches[0]
+        changed.append({'id': uuid4().hex, 'name': recipe['name'], 'quantity': 1,
+                        'recipe_id': recipe['id'], 'mechanics': recipe['mechanics']})
     state['inventory'] = changed
+
+
+WEAPON_DICE = re.compile(r'\b(\d{1,2}d\d{1,2}(?:[+-]\d{1,2})?)\s+физическ\w*\s+урон', re.I)
+WEAPON_STAT = re.compile(r'\b(ловкост\w*|сил[ауыой])\b', re.I)
+
+
+def equipment_blueprints(world_patches, inventory, reply):
+    receipts = list(equipment_receipts(reply))
+    if not receipts:
+        return
+    for entry in world_patches[:12] if isinstance(world_patches, list) else []:
+        if not isinstance(entry, dict) or entry.get('kind') != 'item' or not equipment_spec(entry.get('mechanics')):
+            continue
+        evidence = entry.get('evidence')
+        if not isinstance(evidence, str) or len(evidence.strip()) < 5 or evidence not in reply:
+            continue
+        receipt = next((sentence for name, sentence in receipts
+                        if names_match(entry.get('name'), name)), None)
+        if receipt:
+            # Use the visible name and receipt; validate mechanical data in apply_blueprints.
+            yield {**entry, 'evidence': receipt}
+    for name, evidence in receipts:
+        owned = [item for item in inventory if isinstance(item, dict) and names_match(item.get('name'), name)
+                 and equipment_spec(item.get('mechanics'))]
+        if len(owned) == 1:
+            yield {'kind': 'item', 'name': owned[0]['name'], 'mechanics': owned[0]['mechanics'], 'evidence': evidence}
+            continue
+        dice = WEAPON_DICE.search(evidence)
+        stat = WEAPON_STAT.search(evidence)
+        if dice and stat:
+            mechanics = {'slot': 'weapon', 'dice': dice[1].lower(), 'element': 'physical',
+                         'stat': 'dex' if stat[1].casefold().startswith('ловкост') else 'str'}
+            if equipment_spec(mechanics):
+                yield {'kind': 'item', 'name': name, 'mechanics': mechanics, 'evidence': evidence}
+
+
+def unrecorded_weapon_receipt(state, reply):
+    inventory = state.get('inventory') or []
+    for name, evidence in equipment_receipts(reply):
+        if re.search(r'\b(?:оружи\w*|клин(?:ок|к\w*)|кинжал\w*|меч\w*|арбалет\w*|лук)\b', evidence, re.I):
+            if not any(names_match(name, item.get('name') if isinstance(item, dict) else item)
+                       and item_spec(state, item) for item in inventory):
+                return True
+    return False
 
 
 def narrated_spell_mechanics(value):
@@ -254,5 +335,5 @@ def constructor_context(state, query):
 
 
 CONSTRUCTOR_PROMPT = """
-КОНСТРУКТОР. Для новых проектов, созданных или изучаемых в этой сцене, верни blueprints:[{kind,name,description,mechanics,evidence}]. evidence — дословная фраза с полным названием. kind item: mechanics оружия {slot:weapon,dice,element,stat} или брони {slot:armor,defense,dex_cap}; для обычного предмета опусти mechanics. kind spell/ability: mechanics {dice,element,cost,cooldown,hits,automatic}; числа проверяет сервер. kind race/class: mechanics {bonuses:{str/dex/con/int/wis/cha:1..2},trait}; для class также hp_die (6/8/10/12) и casting_stat (int/wis/cha). При создании героя с авторской расой или классом указывай характеристики до бонусов конструктора. Проект хранится отдельно: заклинание можно изучить через /learn, предмет можно получить в истории и экипировать. Проект не добавляет вещи в инвентарь автоматически. Используй сохранённые проекты из constructor; не переопределяй уже утверждённые правила.
+КОНСТРУКТОР. Для новых проектов, созданных или изучаемых в этой сцене, верни blueprints:[{kind,name,description,mechanics,evidence}]. evidence — дословная фраза с полным названием. kind item: mechanics оружия {slot:weapon,dice,element,stat} или брони {slot:armor,defense,dex_cap}; для обычного предмета опусти mechanics. kind spell/ability: mechanics {dice,element,cost,cooldown,hits,automatic}; числа проверяет сервер. kind race/class: mechanics {bonuses:{str/dex/con/int/wis/cha:1..2},trait}; для class также hp_die (6/8/10/12) и casting_stat (int/wis/cha). При создании героя с авторской расой или классом указывай характеристики до бонусов конструктора. Проект хранится отдельно: заклинание можно изучить через /learn, предмет можно получить в истории и экипировать. Для нового оружия укажи механику в blueprints. Если герой действительно получил предмет, назови полное имя в фразе о вручении и верни его в inventory с resource_events.inventory. Один чертёж без подтверждённой передачи предмет не выдаёт. Используй сохранённые проекты из constructor; не переопределяй уже утверждённые правила.
 """

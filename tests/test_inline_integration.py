@@ -55,16 +55,31 @@ class InlineIntegrationTest(unittest.TestCase):
         self.m.PARTIES.create(self.owner,self.party,{**self.m.DEFAULT_STATE,'name':'Лис','race':'Эльф','class':'Маг','background':'Скиталец'},[])
         self.data={'party_id':self.party,'request_id':self.turn,'revision':0,'action':{'content':'Осматриваю лес.'}}
 
-    def stream(self, wire):
+    def stream(self, wire, *, attempts=None):
         class FakeStream:
+            def __init__(self, text, finish):
+                self.text, self.finish = text, finish
+
             def __iter__(self):
-                for char in wire:
-                    yield types.SimpleNamespace(usage=None,choices=[types.SimpleNamespace(finish_reason=None,delta=types.SimpleNamespace(content=char))])
-                yield types.SimpleNamespace(usage=None,choices=[types.SimpleNamespace(finish_reason='stop',delta=types.SimpleNamespace(content=None))])
-            def close(self): pass
-        req=types.SimpleNamespace(get_json=lambda **kw:self.data,headers={},cookies={})
-        with patch.multiple(self.m,request=req,_owner=lambda:self.owner,_check_presence=lambda *a,**kw:{'admitted':True},_finish_chat_presence=lambda *a:None,_start_stream=lambda *a,**kw:FakeStream(),Response=lambda value,**kw:value,stream_with_context=lambda value:value):
-            return ''.join(self.m.api_chat())
+                for char in self.text:
+                    yield types.SimpleNamespace(usage=None, choices=[types.SimpleNamespace(
+                        finish_reason=None, delta=types.SimpleNamespace(content=char))])
+                if isinstance(self.finish, Exception):
+                    raise self.finish
+                yield types.SimpleNamespace(usage=None, choices=[types.SimpleNamespace(
+                    finish_reason=self.finish, delta=types.SimpleNamespace(content=None))])
+
+            def close(self):
+                pass
+
+        streams = iter(FakeStream(*attempt) for attempt in (attempts or [(wire, 'stop')]))
+        req = types.SimpleNamespace(get_json=lambda **kw: self.data, headers={}, cookies={})
+        with patch.multiple(self.m, request=req, _owner=lambda: self.owner,
+                            _check_presence=lambda *a, **kw: {'admitted': True},
+                            _finish_chat_presence=lambda *a: None, _start_stream=lambda *a, **kw: next(streams),
+                            Response=lambda value, **kw: value, stream_with_context=lambda value: value):
+            answer = self.m.api_chat()
+            return answer if isinstance(answer, str) else ''.join(answer)
 
     def commit(self):
         with patch.multiple(self.m,_owner=lambda:self.owner,_snapshot_response=lambda x:x,_schedule_summary=lambda *a,**kw:None):
@@ -81,6 +96,126 @@ class InlineIntegrationTest(unittest.TestCase):
         self.assertEqual(saved['state']['world_entities'][0]['name'],'Зеркальный волк')
         self.assertEqual(saved['messages'][-1]['content'],story)
         self.assertNotIn('_state_delta',saved['messages'][-1])
+
+    def test_interrupted_quest_turn_retries_safely_and_pays_once(self):
+        quest = {'id': 'lens', 'name': 'Линза маяка', 'status': 'active',
+                 'stages': [{'text': 'Вернуться с отметкой', 'done': False}],
+                 'rewards': {'xp': 40, 'gold': 7}}
+        state = {**self.m.DEFAULT_STATE, 'name': 'Эльза', 'race': 'человек', 'class': 'воин',
+                 'scene': {'location': 'Маяк'}, 'gold': 2, 'quests': [quest]}
+        opening = [{'role': 'assistant', 'content': 'Нора вручает карточку с оттиском белой цапли.'}]
+        self.party = uuid4().hex
+        self.m.PARTIES.create(self.owner, self.party, state, opening)
+        self.data.update(party_id=self.party, action={
+            'content': 'Возвращаюсь с отметкой Норы и сдаю «Линзу маяка».'})
+        partial = 'Мирон сверяет оттиск и протягивает'
+        broken = self.stream('', attempts=[(partial, 'length'), (partial, ConnectionError('lost'))])
+        self.assertNotIn(partial, broken)
+        self.assertNotIn(self.m.TURN_COMPLETE, broken)
+        snapshot = self.m.PARTIES.get(self.owner, self.party)
+        self.assertEqual((snapshot['revision'], snapshot['state']['gold'], snapshot['messages']), (0, 2, opening))
+
+        story = 'Мирон сверяет оттиск белой цапли и подтверждает сдачу квеста.\n+40 XP — квест «Линза маяка».'
+        completed = {**quest, 'status': 'completed',
+                     'stages': [{'text': 'Вернуться с отметкой', 'done': True}]}
+        wire = story + START + json.dumps({'quests': [completed]}, ensure_ascii=False) + END
+        self.assertEqual(self.stream(wire, attempts=[(partial, 'length'), (wire, 'stop')]),
+                         story + self.m.TURN_COMPLETE)
+        self.assertEqual(self.stream(''), story + self.m.TURN_COMPLETE)
+        saved = self.commit()
+        self.assertEqual((saved['revision'], saved['state']['gold'], saved['state']['xp']), (1, 9, 40))
+        self.assertEqual(saved['messages'][0], opening[0])
+        self.assertEqual(saved['messages'][-1]['content'], story)
+        self.assertEqual(self.commit(), saved)
+
+    def test_declined_weapon_blueprint_and_receipt_survive_equipping_and_reload(self):
+        story = 'Мирон вручает тебе «Кедровый клинок». Механику «Кедрового клинка» подтвердили.'
+        mechanics = {'slot': 'weapon', 'dice': '1d6', 'element': 'physical', 'stat': 'dex'}
+        recipe = {'kind': 'item', 'name': 'Кедровый клинок', 'mechanics': mechanics,
+                  'evidence': 'Механику «Кедрового клинка» подтвердили.'}
+        self.assertEqual(self.stream(story + START + json.dumps({'blueprints': [recipe]}, ensure_ascii=False) + END),
+                         story + self.m.TURN_COMPLETE)
+        first = self.commit()
+        self.assertEqual(self.commit(), first)
+        current = self.m.PARTIES.get(self.owner, self.party)['state']
+        project, = current['constructor']
+        item, = current['inventory']
+        self.assertEqual((item['recipe_id'], item['mechanics'], item['quantity']), (project['id'], mechanics, 1))
+        equipped, reply = self.m._engine_command(current, '/equip Кедровый клинок', None)
+        self.assertIn('Экипировано', reply)
+        from engine.equipment import equipped as equipped_item
+        self.assertEqual(equipped_item(equipped, 'weapon'), mechanics)
+        self.assertIn('Кедровый клинок', self.m._engine_command(current, '/design', None)[1])
+        from engine.combat import combat_turn
+        equipped['scene'] = {'location': 'Полигон'}
+        equipped['world_entities'] = [{'id': 'ash', 'kind': 'creature', 'name': 'Ясень',
+                                       'location': 'Полигон', 'hp': 8, 'max_hp': 8, 'threat': 'minor'}]
+        with patch('engine.combat.randint', return_value=5):
+            _, attack = combat_turn(equipped, '/attack', 'Ясень', roller=lambda low, high: min(19, high))
+        self.assertIn('кедровый клинок', attack.casefold())
+        earlier = {'role': 'user', 'content': 'Проверяю проект.'}
+        for reply, expected in (
+            ('Мирон не вручает тебе «Кедровый клинок».', []),
+            ('Мирон готов вручить тебе «Кедровый клинок».', []),
+            ('Мирон уже вручает тебе «Кедровый клинок».', []),
+        ):
+            with self.subTest(reply=reply):
+                state = {**current, 'inventory': []}
+                updated = self.m.extract_state([earlier, {'role': 'assistant', 'content': reply}],
+                                              state, inline_delta={})
+                self.assertEqual(updated['inventory'], expected)
+        grant = 'Мирон вручает тебе «Янтарный кинжал».'
+        delta = {'world_entities': [{'kind': 'item', 'name': 'Янтарный кинжал',
+                                     'mechanics': mechanics, 'evidence': grant}]}
+        updated = self.m.extract_state([earlier, {'role': 'assistant', 'content': grant}],
+                                      current, inline_delta=delta)
+        self.assertEqual([p['name'] for p in updated['constructor']], ['Кедровый клинок', 'Янтарный кинжал'])
+        self.assertEqual(updated['inventory'][-1]['mechanics'], mechanics)
+        text = 'Мирон вручает тебе «Медный тесак»: 1d6 физического урона, Ловкость.'
+        latest = self.m.extract_state([earlier, {'role': 'assistant', 'content': text}],
+                                     current, inline_delta={})
+        self.assertEqual(latest['inventory'][-1]['mechanics'], mechanics)
+        self.assertEqual(latest['constructor'][-1]['name'], 'Медный тесак')
+
+    def test_weapon_receipt_with_missing_inline_details_is_reconciled_before_commit(self):
+        story = 'Мирон вручает тебе «Кедровый клинок» — лёгкое оружие с коротким лезвием.'
+        wire = story + START + '{}' + END
+        self.assertEqual(self.stream(wire), story + self.m.TURN_COMPLETE)
+        mechanics = {'slot': 'weapon', 'dice': '1d6', 'element': 'physical', 'stat': 'dex'}
+        delta = {'world_entities': [{'kind': 'item', 'name': 'Кедровый клинок',
+                                     'mechanics': mechanics, 'evidence': story}]}
+        response = types.SimpleNamespace(choices=[types.SimpleNamespace(
+            finish_reason='stop', message=types.SimpleNamespace(content=json.dumps(delta)))])
+        with patch.object(self.m, '_measured_completion', return_value=response) as extract:
+            saved = self.commit()
+            self.assertEqual(saved, self.commit())
+        extract.assert_called_once()
+        item, = saved['state']['inventory']
+        project, = saved['state']['constructor']
+        self.assertEqual((item['recipe_id'], item['mechanics']), (project['id'], mechanics))
+
+    def test_two_mirons_keep_their_own_meeting_places_and_ids_after_reload(self):
+        workshop = 'Мастерская Кедровой Гавани'
+        gates = 'Ворота Кедровой Гавани'
+        story = ('У ворот тебя встречает страж Мирон; он остаётся на посту и указывает дорогу к мастерской. '
+                 'Там ты знакомишься с другим Мироном — оружейником, который занят работой у наковальни.')
+        delta = {'scene': {'location': workshop}, 'world_entities': [
+            {'name': 'Мирон', 'kind': 'npc', 'role': 'страж', 'location': workshop,
+             'evidence': 'У ворот тебя встречает страж Мирон'},
+        ]}
+        self.stream(story + START + json.dumps(delta, ensure_ascii=False) + END)
+        first = self.commit()
+        world = {entry['role']: entry for entry in first['state']['world_entities']}
+        self.assertEqual({role: entry['location'] for role, entry in world.items()},
+                         {'страж': gates, 'оружейник': workshop})
+        self.assertEqual(len({entry['id'] for entry in world.values()}), 2)
+        fresh_story = 'У ворот Кедровой Гавани на посту стоит страж Мирон. Оружейник остаётся в мастерской.'
+        self.data.update(revision=1, request_id=uuid4().hex, action={'content': 'Иду к воротам.'})
+        self.stream(fresh_story + START + json.dumps({'scene': {'location': gates}}, ensure_ascii=False) + END)
+        self.commit()
+        saved = self.m.PARTIES.get(self.owner, self.party)
+        self.assertCountEqual([(e['id'], e['role'], e['location']) for e in saved['state']['world_entities']],
+                              [(e['id'], e['role'], e['location']) for e in world.values()])
 
     def test_unicode_metadata_is_hidden_and_committed(self):
         story = 'Лина возвращается в таверну.'

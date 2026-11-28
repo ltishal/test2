@@ -40,7 +40,7 @@ from engine.equipment import (item_spec, equipment_spec, ammo_kind, ammo_availab
                               require_ammo, consume_ammo)
 from engine.api_budget import ApiBudget, BudgetExceeded, estimated_units
 from engine.constructor import (CONSTRUCTOR_PROMPT, TYPES, apply_blueprints, apply_character_blueprints, recipe_matches,
-                                attach_item_blueprints, attach_learned_spell, constructor_context,
+                                attach_item_blueprints, attach_learned_spell, constructor_context, equipment_blueprints, unrecorded_weapon_receipt,
                                 learn_blueprint, learned_spell_from_story, recipes)
 from engine.turn_protocol import DeltaStream, PROTOCOL_PROMPT, validate_delta
 from engine.world import (NPC_CONTINUITY_PROMPT, WORLD_PROMPT, world_context, merge_entities, npc_damage,
@@ -58,7 +58,7 @@ from party_store import PartyConflict, PartyMissing, PartyStore
 from token_usage import TokenUsage, state_turn_id
 
 BASE_DIR = Path(__file__).resolve().parent
-APP_REVISION = "2026-11-28.world-alpha5.1.8"
+APP_REVISION = "2026-11-28.world-alpha5.1.9"
 QWEN_SUMMARY_LIMIT = 480
 QWEN_STATE_LIMIT = 1100
 QWEN_STATE_SETUP_LIMIT = 2200
@@ -1989,6 +1989,8 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
     trade_log = []
     price_proposals = new_state.pop("shop_offers", None)
     purchase = new_state.pop("purchase", None)
+    # Let the transaction path own item changes on purchase turns, even if it rejects the proposal.
+    equipment_receipt_story = '' if purchase or PURCHASE_CANCELLED.search(latest) else latest
     offers_at_scene = {**current, "scene": campaign_scene, "world_entities":entities}
     stored_offers = current_offers(offers_at_scene, include_sold_out=True)
     current["shop_offers"] = merge_offers(offers_at_scene, price_proposals, latest, action=action)
@@ -2259,9 +2261,12 @@ def extract_state(messages, current_state, turn_id=None, result=None, *, inline_
     merged["notes"] = [n for n in (normalize_note(x) for x in merged["notes"]) if n]
     proposed_spells = learned_spell_from_story(latest, merged.get("name"))
     blueprints = blueprint_proposals if isinstance(blueprint_proposals, list) else []
-    design_log = apply_blueprints(merged, [*blueprints, *proposed_spells], latest)
+    item_projects = equipment_blueprints(world_patches, merged["inventory"], equipment_receipt_story)
+    design_log = apply_blueprints(merged, [*blueprints, *proposed_spells, *item_projects], latest)
     attach_learned_spell(merged, proposed_spells)
-    attach_item_blueprints(merged)
+    attach_item_blueprints(merged, equipment_receipt_story)
+    if inline_delta is not None and not new_character and unrecorded_weapon_receipt(merged, equipment_receipt_story):
+        raise StateUnavailable("Нужна отдельная сверка полученного оружия.")
     if new_character:
         apply_character_blueprints(merged)
         merged.pop("character_setup_pending", None)
@@ -2915,6 +2920,7 @@ def api_chat():
                 # отклонить режим — тогда останется хотя бы увеличенный лимит.
                 (NARRATION_RETRY_TOKENS + (INLINE_STATE_EXTRA_TOKENS if inline_enabled else 0), NARRATION_RETRY_EFFORT),
             ]
+            had_interrupted_reply = False
             for limit, effort in variants:
                 attempts += 1
                 diag = {}
@@ -2925,6 +2931,8 @@ def api_chat():
                 content_chars = 0
                 reasoning_chars = 0
                 finish = None
+                buffered = []
+                interrupted = False
                 try:
                     try:
                         stream = _start_stream(messages, max_tokens=limit,
@@ -2956,8 +2964,11 @@ def api_chat():
                             content_chars += len(text)
                             if first_text_at is None:
                                 first_text_at = perf_counter()
-                            emitted = True
-                            yield text
+                            if party:
+                                buffered.append(text)
+                            else:
+                                emitted = True
+                                yield text
                         elif delta is not None:
                             reasoning = (getattr(delta, "reasoning_content", None)
                                          or getattr(delta, "reasoning", None))
@@ -2969,7 +2980,7 @@ def api_chat():
                         hint = _error_hint(e)
                         yield f"\n[Ошибка API: {_short_error(e)}" + (f" {hint}" if hint else "") + "]"
                         return
-                    # До первого текста ничего не отправлено — повтор безопасен.
+                    interrupted = True
                 finally:
                     try:
                         if stream is not None:
@@ -2978,9 +2989,14 @@ def api_chat():
                         if usage is not None:
                             last_usage = usage
                         TOKEN_USAGE.record(turn_id, "chat", model, usage)
+                complete = not interrupted and (finish == "stop" or (finish == "length" and parser.in_delta))
+                had_interrupted_reply |= bool(buffered and not complete) or interrupted
+                if buffered and complete:
+                    emitted = True
+                    yield "".join(buffered)
                 if emitted and inline_enabled:
                     inline_data["delta"] = parser.finish()
-                if emitted and finish != "stop" and not (finish == "length" and parser.in_delta):
+                if emitted and not complete:
                     yield "\n[Ошибка API: ответ мастера оборвался. Ход можно повторить.]"
                     return
                 if diag.get("reasoning_rejected"):
@@ -2992,13 +3008,15 @@ def api_chat():
                     yield TURN_COMPLETE
                     return
                 print(
-                    f"[chat] пустой ответ: попытка={attempts} limit={limit} "
+                    f"[chat] неполный или пустой ответ: попытка={attempts} limit={limit} "
                     f"effort={effort or '—'} finish={finish} content_chars={content_chars} "
                     f"reasoning_chars={reasoning_chars} "
                     f"reasoning_tokens={getattr(getattr(usage, 'completion_tokens_details', None), 'reasoning_tokens', None)}",
                     flush=True,
                 )
-            if not emitted:
+            if not emitted and had_interrupted_reply:
+                yield "\n[Ошибка API: ответ мастера оборвался. Ход можно повторить.]"
+            elif not emitted:
                 yield ("\n[Ошибка API: модель не вернула текст. Обычно это значит, что "
                        "весь лимит вывода ушёл на скрытые рассуждения. Отправьте сообщение "
                        "ещё раз; если повторяется — задайте в Railway CHAT_REASONING_EFFORT=none "
